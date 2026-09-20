@@ -1,0 +1,343 @@
+# Streaming, Worked Out
+
+Source: https://pasekpasek.github.io/streaming-worked-out/
+Author: Paweł Pasek
+Verified against: a real node:http server and a real fetch + ReadableStream client (SSE parsing),
+the real TextDecoder (UTF-8 chunk boundaries), and executed matrices for the two resumption designs.
+RFC, spec and MDN statements are quoted from those documents.
+
+A server writes. Some time later, a browser has words on it. In between sit a transfer coding, a
+framing rule and a decoder, and every bug in a streaming feature lives in one of those three. This is
+the plain-text version of the page, without the sandboxes.
+
+## 01. Three things always true about a stream
+
+Streaming looks like a feature you add. It is closer to a constraint you accept: the moment a
+response stops arriving all at once, three things become true and stay true, whether the payload is
+log lines, stock ticks or a model's tokens.
+
+1. The pieces are not yours to choose. One write() on the server is not one read() on the client.
+   The TCP stack, the proxies in between and the client's buffer all get a vote on where the
+   boundaries fall. Code that assumes "one write, one message" works perfectly on localhost and fails
+   the first time a payload crosses an MTU or a proxy coalesces two writes.
+2. Therefore a stream needs a framing rule — something that says "this unit is complete." Without one
+   you cannot distinguish "nothing more yet" from "nothing more ever". SSE's rule is a blank line;
+   the Anthropic Messages API's is content_block_stop; other protocols prefix each frame with its
+   length. The rule differs, the need for one does not.
+3. A stream can stop in the middle, and resuming needs somebody to have remembered a position. The
+   sender cannot know what arrived — that is the one thing it has no access to. Only the receiver
+   knows what it saw, so the receiver has to say so on the way back in. That is the entire reason the
+   Last-Event-ID header exists.
+
+Everything below is one of those three wearing a costume. A data: field held in a buffer is fact 1;
+a blank line is fact 2; a retry: value and a reconnect header are fact 3. So is a model's tool call
+arriving as JSON that is not valid JSON yet.
+
+## 02. An HTTP response that doesn't end
+
+Before any streaming-specific machinery, the server must be allowed to keep writing to a response it
+has already started. That is not a trick played on HTTP; it is a transfer coding, specified.
+
+An ordinary response announces its size up front with Content-Length, which a server can only do if
+it already knows the size — which it does not, if the content is still being produced. RFC 9112
+states the alternative's purpose exactly: "Chunked enables content streams of unknown size to be
+transferred as a sequence of length-delimited buffers, which enables the sender to retain connection
+persistence and the recipient to know when it has received the entire message." The coding "is
+complete when a chunk with a chunk-size of zero is received" — so a streaming endpoint simply never
+sends that terminating chunk.
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    res.flushHeaders()   // send the headers NOW, don't wait for the first body write
+
+    res.write('data: first\n\n')   // ...and the response stays open
+
+flushHeaders() is the one people miss. Without it Node may hold the headers until it has body bytes
+worth sending, so a client waiting for a response waits for your first event instead of for the
+connection. On a slow first token — which is every model call — that is the difference between
+"instant" and "broken".
+
+Note what is not here: no protocol upgrade, no handshake, no second port. This is a plain GET that
+has not finished, which is why SSE works through anything that speaks HTTP — and why, in §09,
+anything that speaks HTTP a little too enthusiastically can break it.
+
+Source: RFC 9112 §7.1, https://www.rfc-editor.org/rfc/rfc9112#section-7.1
+
+## 03. SSE: the wire format
+
+Server-Sent Events is fact 2, standardised. Given a response that stays open, SSE answers "where does
+one message end?" — and the answer is a blank line.
+
+    id: 42
+    event: task.completed
+    data: {"taskId":"write-intro","actor":"writer"}
+
+    data: a plain message with no id or type — dispatched as "message"
+
+- data: — the payload. Several data: lines before the blank line join with newlines into one event's
+  data, which is how multi-line content travels without an escape.
+- event: — the type a client filters on with addEventListener(type, ...). Omit it and the event
+  dispatches as the generic "message".
+- id: — the resumption checkpoint; the client remembers the last one it saw.
+- retry: — how many milliseconds to wait before reconnecting. Per the spec, if the value "consists of
+  only ASCII digits" it is interpreted as an integer and sets "the event stream's reconnection time".
+- A line starting with ":" is a comment and is ignored. Servers send these as keep-alives so idle
+  connections are not reaped (§09).
+
+Two spec details cause real bugs. On the colon: "Collect the characters on the line before the first
+U+003A COLON character (:), and let field be that string" — the field name is everything before the
+FIRST colon, so a JSON payload full of colons is safe on a data: line. And on the terminator: "Note
+that the last still has to end with a blank line, the end of the stream is not enough to trigger the
+dispatch of the last event."
+
+Read that twice if you are writing a server. Closing the connection does not flush the last event. A
+server that writes `data: done\n` and hangs up has sent nothing at all, and the bug presents as "the
+last message is missing sometimes".
+
+The page's sandbox steps one stream through five chunk boundaries — the first cuts a field name in
+half — showing the partial line held in the parser buffer and the events appearing only on blank
+lines. That parser is the one test-model.ts checks against a real node:http server.
+
+Source: WHATWG HTML — Server-Sent Events,
+https://html.spec.whatwg.org/multipage/server-sent-events.html
+
+## 04. EventSource, reconnection, and what you get for free
+
+    const es = new EventSource("/events");
+    es.onmessage = (e) => { const ev = JSON.parse(e.data); handleEvent(ev); };
+    es.addEventListener("task.completed", (e) => { /* only `event: task.completed` */ });
+
+Free: parsing, dispatch by event type, and automatic reconnection. When the connection drops the
+browser waits the reconnection time and reopens the request, announcing where it got to. The spec:
+"The Last-Event-ID HTTP request header reports an EventSource object's last event ID string to the
+server when the user agent is to reestablish the connection."
+
+So resumption is a two-sided contract and the browser only holds up one side. It sends the header;
+whether anything useful happens depends on your server reading it. A server that ignores
+Last-Event-ID and replays from the top delivers duplicates forever, every time a laptop lid closes.
+
+What EventSource will not do:
+- Custom headers, including Authorization. Options: a cookie, a token in the query string (which
+  lands in access logs), or moving to fetch + ReadableStream (§07). Most production SSE code ends up
+  in the third bucket, and this is usually why.
+- Anything but GET. No request body, so an endpoint needing a large input — a model prompt — cannot
+  use EventSource at all.
+- Give up. It reconnects indefinitely; closing it is your job, via es.close().
+
+The other design: a server holding a small bounded buffer can hand every new connection the whole
+buffer and let the client sort it out, which is what 4th-devs does for its agent dashboard
+deliberately — the client re-renders from scratch and de-duplicates by id, so exact resumption never
+has to be the server's job. A legitimate trade; the page's sandbox shows the cost of getting the
+client half wrong, where the replayed buffer lands as duplicates.
+
+## 05. The server side: where your events meet the socket
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    res.flushHeaders()
+    for (const past of replay()) res.write(`data: ${JSON.stringify(past)}\n\n`)
+    const unsubscribe = subscribe(event => res.write(`data: ${JSON.stringify(event)}\n\n`))
+
+Source: 4th-devs, https://github.com/i-am-alice/4th-devs/blob/main/05_01_agent_graph/src/server.ts
+
+The last line is the seam this page sits on. On its left, subscribe belongs to an in-process event
+bus with no idea who is listening — that is event-driven architecture, and it has its own page:
+https://pasekpasek.github.io/event-driven-architecture-worked-out/. On its right, res.write is one
+socket belonging to one identified browser. Swap the right-hand side for a Kafka producer and the
+left-hand side does not change. SSE is the transport; the bus is the architecture; that line is the
+adapter.
+
+The two lines that are not in the snippet:
+
+    // 1. Keep-alive: a comment line, ignored by the parser, that keeps bytes flowing
+    //    so idle proxies and load balancers don't reap the connection (§09).
+    const ping = setInterval(() => res.write(': keep-alive\n\n'), 15_000)
+
+    // 2. Cleanup: without this, every disconnect leaks a listener and a timer, and the
+    //    bus keeps writing to a dead socket.
+    req.on('close', () => { clearInterval(ping); unsubscribe(); })
+
+The cleanup is not bookkeeping. A subscriber list that only grows is a memory leak and a slow CPU
+leak — each dead connection still gets serialised into on every event — presenting as "the dashboard
+gets slower the longer it's been up".
+
+## 06. A model's tokens are an SSE stream
+
+Set stream: true on an Anthropic Messages API call and the response body is exactly a
+text/event-stream: same blank lines, same event: and data: fields, same buffering problem. What is
+added is that the event types and payloads are documented rather than ad hoc.
+
+One turn is a fixed sequence: message_start (the message shell, empty content array), then per
+content block content_block_start → repeated content_block_delta → content_block_stop, then
+message_delta (carrying stop_reason) and message_stop. A ping event may appear between deltas as a
+keep-alive with no content — the same job as the ": keep-alive" comment line in §05, promoted to a
+typed event.
+
+A tool call is a content block whose content_block_start has "type": "tool_use" and a partial,
+growing set of arguments: each content_block_delta for that block carries an input_json_delta with a
+partial_json string fragment, not a complete value. The fragments concatenate and are only guaranteed
+parseable once content_block_stop closes the block.
+
+That is fact 2 one level up the stack. The blank line told you a line-oriented unit was complete;
+content_block_stop tells you a semantic unit is complete. Both exist because the alternative —
+guessing from the absence of more bytes — cannot distinguish "not yet" from "never". A client that
+runs JSON.parse on each fragment as it arrives is making exactly that guess, and will be wrong on
+every tool call with more than one delta.
+
+The page's sandbox steps through a real captured tool-call turn, quoted verbatim from Anthropic's
+published streaming documentation (not captured from a live API call), watching the tool input
+accumulate as a string that is not valid JSON until the block closes.
+
+Source: https://platform.claude.com/docs/en/build-with-claude/streaming
+
+## 07. Consuming a stream in TypeScript
+
+§04 explained why real code often cannot use EventSource: no headers, no request body, GET only. The
+replacement is fetch plus the response's ReadableStream.
+
+    const res = await fetch("/v1/messages", {
+      method: "POST",                                 // EventSource cannot do this
+      headers: { authorization: `Bearer ${token}` },  // nor this
+      body: JSON.stringify({ stream: true, messages }),
+      signal: controller.signal,                      // nor cancellation
+    });
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    const parser = createSseParser();
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      for (const event of parser.push(decoder.decode(value, { stream: true }))) {
+        handle(event);
+      }
+    }
+
+Two buffers are in play and they are easy to confuse. The parser buffers a partial LINE until a
+newline arrives (§03). The decoder buffers partial BYTES until a whole character arrives — that is
+what { stream: true } buys. The Encoding standard: "The method can be invoked zero or more times with
+options's stream set to true, and then once without options's stream (or set to false), to process a
+fragmented input."
+
+Drop the option and the code still works — on English text. UTF-8 encodes anything outside ASCII as
+two to four bytes, and fact 1 says the chunk boundary can land anywhere, including between them. A
+decoder told the input is complete does the only thing it can with half a character: replaces it with
+U+FFFD. The bytes are gone; no later chunk repairs them.
+
+The page's sandbox splits `data: {"t":"café ☕"}` at byte offsets that cut the three-byte ☕ in half
+and decodes the same bytes both ways side by side: the naive decoder ends with three U+FFFD where one
+character used to be, the streaming decoder with the text the server sent. A split that falls between
+characters is harmless either way, which is exactly why the bug survives code review.
+
+Cancellation is not optional. A streaming request the user navigated away from is still running,
+still costing money if a model is on the other end, and still holding a connection. Use an
+AbortController, pass its signal to fetch, call abort(), and treat AbortError as a normal exit rather
+than a failure — otherwise every cancelled stream reports itself as a crash.
+
+Source: WHATWG Encoding, https://encoding.spec.whatwg.org/#dom-textdecoder-decode
+
+## 08. SSE, WebSocket, long-polling: picking one
+
+- SSE — a GET that never finishes, in a text format. One direction, server to client. Reconnection
+  and resumption are in the spec. Pick it when the data flows one way: notifications, progress, logs,
+  model tokens. It is ordinary HTTP, so proxies, auth, compression and observability already work.
+- WebSocket — a protocol upgrade to a persistent, bidirectional, framed connection, no longer HTTP
+  after the handshake. Pick it when the client genuinely sends a lot, continuously: typing
+  indicators, multiplayer, collaborative editing. You inherit its infrastructure: your own
+  heartbeats, your own reconnect-and-resume, and middleboxes that understand none of it.
+- Long-polling — a request the server holds until it has something, then answers, and the client
+  immediately asks again. Correct, simple, and it pays a full round-trip per message.
+
+The one genuine constraint is connection count, and it is a browser limit rather than a protocol one.
+MDN: "When not used over HTTP/2, SSE suffers from a limitation to the maximum number of open
+connections, which can be especially painful when opening multiple tabs, as the limit is per browser
+and is set to a very low number (6)." Over HTTP/2 the ceiling is negotiated and "defaults to 100".
+
+"But I need to send data back" is usually not an argument: the client can make ordinary HTTP requests
+whenever it likes. A stream down and normal POSTs up is a perfectly good bidirectional system, and it
+is how every streaming model API on the market works. Reach for WebSocket when the upward traffic is
+continuous, not merely present.
+
+Source: https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
+
+## 09. What goes wrong
+
+- A buffering proxy. The most common cause. nginx buffers proxied responses by default — right for
+  ordinary responses, fatal for this one. Fix with proxy_buffering off, or send X-Accel-Buffering: no
+  so the decision travels with the response rather than living in someone else's config file.
+- Compression without flushing. A gzip layer waiting for a full window does what the proxy did, one
+  layer lower. Disable compression for text/event-stream or flush per write.
+- Idle timeouts. Load balancers reap connections with no bytes on them, commonly after 60 seconds. If
+  your stream can be quiet longer than that, §05's keep-alive comment is what keeps you connected.
+- No cleanup on disconnect. Without req.on('close', ...) the subscriber list grows forever and every
+  event is serialised for sockets nobody is reading.
+- Assuming one write is one message. Fact 1. It works until a payload gets big or a proxy coalesces.
+- Ignoring backpressure. res.write() returns false when the kernel buffer is full; a producer that
+  keeps writing grows an unbounded queue in process memory, so a slow client becomes your memory
+  problem. That is the event loop's business: https://pasekpasek.github.io/event-loop-worked-out/
+
+Diagnostic: run curl -N against the endpoint directly, then through your proxy. If events appear live
+in the first and arrive in a clump in the second, nothing in your application code is wrong.
+
+## 10. The whole page in rules, and scope
+
+1. One write() is not one read(). Anything that assumes otherwise is correct on localhost and wrong
+   in production.
+2. Every stream needs a framing rule, because "no more bytes yet" and "no more bytes ever" look
+   identical. SSE's is a blank line; a model turn's is content_block_stop.
+3. Closing the connection does not dispatch the last event. It needs its blank line, and the spec
+   says so in as many words.
+4. Streaming over HTTP is not a hack: chunked transfer coding exists to carry "content streams of
+   unknown size". Remember flushHeaders().
+5. Resumption is a two-sided contract. The browser sends Last-Event-ID; if your server ignores it,
+   every reconnect replays duplicates. Replaying a bounded buffer instead is valid, but only with a
+   client that de-duplicates.
+6. EventSource cannot set headers, cannot POST, and never gives up. Real code usually ends up on
+   fetch + ReadableStream for the first of those reasons.
+7. Decode with { stream: true }. A multi-byte character split across chunks becomes U+FFFD
+   permanently, and it only happens to text you did not test with.
+8. Cancel with AbortController, and treat AbortError as a normal exit.
+9. Send keep-alive comments and clean up on close. One keeps proxies from reaping you; the other
+   keeps you from leaking a listener per disconnect.
+10. If it works with curl -N and not through the proxy, it is the proxy. Over HTTP/1.1 you also get
+    six connections per browser, total.
+
+Left out, on purpose:
+
+- The architecture on the other side of the seam. What produces the events, who else consumes them,
+  what a broker guarantees about delivery and ordering — a different question from how bytes cross a
+  socket, with its own page:
+  https://pasekpasek.github.io/event-driven-architecture-worked-out/
+  §05's subscribe(event => res.write(event)) is the seam between the two.
+- WebSocket in earnest. Named and compared in §08, not built. Frames, ping/pong, subprotocols and
+  scaling a stateful connection layer are a page of their own.
+- gRPC streaming and HTTP/2 server push. Both real, both a different ecosystem, and neither is what a
+  browser talking to a JSON API reaches for.
+
+## About this page's models
+
+Four of this page's models are backed by running code, checked by test-model.ts (15 checks):
+
+- The SSE parser is checked against a real node:http server, including an event deliberately split
+  across two TCP-level writes, over a real fetch + ReadableStream client.
+- The WHATWG dispatch rules are executed: a stream ending without a blank line dispatches nothing, an
+  incomplete line is held in the buffer rather than guessed at, and a comment line dispatches nothing.
+- The UTF-8 boundary is checked against the real TextDecoder: that the fixture genuinely cuts the
+  three-byte ☕ in half, that { stream: true } reassembles it exactly, that omitting the option
+  replaces it with U+FFFD permanently, and that a clean split is harmless either way.
+- The two resumption designs are checked: Last-Event-ID sends exactly what was missed, replay without
+  client de-duplication produces duplicates, replay with it ends up identical to resuming by id, and
+  a client with no Last-Event-ID gets the whole buffer rather than nothing.
+
+The RFC 9112, WHATWG HTML, WHATWG Encoding and MDN statements are quoted from those documents, not
+reproduced locally. The §06 streaming fixture is quoted from Anthropic's own published documentation,
+not captured from a live API call.
+
+Run the harness: node test-model.ts

@@ -1,0 +1,79 @@
+# Streaming, Worked Out
+
+> An interactive, single-page explainer for streaming over HTTP: why a response is allowed to stay
+> open (chunked transfer coding), what Server-Sent Events actually specifies, how `EventSource`
+> reconnection and `Last-Event-ID` work, how an AI model's tokens arrive as an SSE stream, and how to
+> consume one in TypeScript without losing a character to a chunk boundary. The SSE parser, the
+> WHATWG dispatch rules, the UTF-8 decoder behaviour and the two resumption designs are verified
+> against real running code by `test-model.ts`. Author: Paweł Pasek.
+
+Key points made on this page:
+
+- **Three facts about any stream** — (1) the pieces are not yours to choose: one `write()` on the
+  server is not one `read()` on the client, so code that assumes "one write, one message" is correct
+  on localhost and wrong in production; (2) therefore a stream needs a framing rule, because "no more
+  bytes yet" and "no more bytes ever" look identical — SSE's is a blank line, a model turn's is
+  `content_block_stop`; (3) a stream can stop mid-flight, and only the receiver knows what arrived,
+  which is why resumption is a header the client sends.
+- **Chunked transfer coding** — RFC 9112: "Chunked enables content streams of unknown size to be
+  transferred as a sequence of length-delimited buffers." A streaming endpoint simply never sends the
+  terminating zero-length chunk. Call `res.flushHeaders()` or the headers wait for your first event.
+- **The SSE wire format** — lines of `field: value`; a blank line dispatches. `data:` (multiple lines
+  join with newlines), `event:` (type for `addEventListener`, default `"message"`), `id:` (resumption
+  checkpoint), `retry:` (reconnection time in ms), and a leading `:` marks a comment used as a
+  keep-alive. The field name is everything before the *first* colon, so JSON payloads are safe. The
+  spec rule that causes the most bugs: "the last still has to end with a blank line, the end of the
+  stream is not enough to trigger the dispatch of the last event."
+- **EventSource** — gives you parsing, dispatch by type and automatic reconnection announcing
+  `Last-Event-ID`. It cannot set request headers (including `Authorization`), cannot POST or send a
+  body, and never stops retrying. Real code usually moves to `fetch` + `ReadableStream` for the first
+  of those reasons. Resumption is a two-sided contract: the browser sends the header, but a server
+  that ignores it replays duplicates forever. Replaying a whole bounded buffer instead is a valid
+  design, but only paired with a client that de-duplicates by id.
+- **AI model streaming** — the same mechanism with a documented schema: `message_start` → per-block
+  `content_block_start`/`content_block_delta`/`content_block_stop` → `message_delta` →
+  `message_stop`, with `ping` as a typed keep-alive. Tool-call arguments arrive as `input_json_delta`
+  fragments (`partial_json`) that are only guaranteed parseable once the block closes — fact 2 one
+  level up the stack.
+- **Consuming in TypeScript** — `fetch` + `res.body.getReader()` + a `TextDecoder`. Two buffers are
+  in play: the parser holds a partial *line*, the decoder holds partial *bytes*. Decode with
+  `{ stream: true }`, or a multi-byte character split across chunks becomes `U+FFFD` permanently and
+  silently. Cancel with `AbortController` and treat `AbortError` as a normal exit.
+- **SSE vs WebSocket vs long-polling** — SSE is one-directional ordinary HTTP, so proxies, auth and
+  observability already work; WebSocket is a protocol upgrade worth taking when upward traffic is
+  *continuous*, not merely present, and you inherit its heartbeats and resumption yourself. A stream
+  down plus ordinary POSTs up is a perfectly good bidirectional system. The one genuine SSE limit is
+  browser connection count: six per browser on HTTP/1.1, negotiated (default 100) on HTTP/2.
+- **What goes wrong** — a buffering proxy (nginx `proxy_buffering off`, or send
+  `X-Accel-Buffering: no`), compression that doesn't flush, load-balancer idle timeouts, no cleanup
+  on disconnect (a leaked listener per drop), assuming one write is one message, and ignoring
+  backpressure when `res.write()` returns false. Diagnostic: `curl -N` direct versus through the
+  proxy; if only the direct one streams, nothing in your application code is wrong.
+
+## Page
+
+- [Streaming, Worked Out](https://pasekpasek.github.io/streaming-worked-out/): the full explainer.
+
+## Source material
+
+- [RFC 9112 §7.1 — HTTP/1.1 chunked transfer coding](https://www.rfc-editor.org/rfc/rfc9112#section-7.1)
+- [WHATWG HTML — Server-Sent Events](https://html.spec.whatwg.org/multipage/server-sent-events.html): the wire format, the parsing algorithm, and the `Last-Event-ID` header.
+- [WHATWG Encoding — TextDecoder.decode()](https://encoding.spec.whatwg.org/#dom-textdecoder-decode): the `stream` option and fragmented input.
+- [MDN — Using server-sent events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events): the six-connection HTTP/1.1 limit.
+- [Anthropic Messages API — streaming](https://platform.claude.com/docs/en/build-with-claude/streaming): the "Streaming request with tool use" response quoted verbatim as this page's §06 fixture.
+- [4th-devs](https://github.com/i-am-alice/4th-devs), `05_01_agent_graph/src/{server.ts,events.ts}`: the SSE handler and in-process event bus this page quotes.
+
+## Caveat
+
+Four of the page's models are checked by `test-model.ts` (15 checks): the SSE parser against a real
+`node:http` server with an event split across two TCP-level writes, the WHATWG dispatch rules, the
+UTF-8 chunk-boundary behaviour against the real `TextDecoder`, and the two resumption designs. The
+RFC, spec and MDN statements are quoted from those documents rather than reproduced. The §06
+streaming fixture is quoted from Anthropic's own published documentation, not captured from a live
+API call.
+
+## Optional
+
+- [Source repository](https://github.com/PasekPasek/streaming-worked-out): one HTML file, no build step, MIT.
+- [event-driven-architecture-worked-out](https://pasekpasek.github.io/event-driven-architecture-worked-out/): the sibling page for the architecture half — what produces the events, who consumes them, and what a broker guarantees.
+- [event-loop-worked-out](https://pasekpasek.github.io/event-loop-worked-out/): the sibling page on Node's event loop, where backpressure and write ordering live.

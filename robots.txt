@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://pasekpasek.github.io/streaming-worked-out/sitemap.xml

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#1A2028"/>
+  <rect x="0.5" y="0.5" width="1199" height="629" fill="none" stroke="#2C3743" stroke-width="2"/>
+  <g font-family="IBM Plex Mono, DejaVu Sans Mono, monospace" fill="#8C99A6" font-size="20">
+    <text x="80" y="92">streaming — worked out</text>
+  </g>
+  <g font-family="IBM Plex Serif, DejaVu Serif, Georgia, serif" fill="#DDE3E9" font-weight="600" font-size="56">
+    <text x="80" y="212">How bytes become events,</text>
+    <text x="80" y="282">and events become tokens</text>
+  </g>
+
+  <g fill="#222B35" stroke="#3A4552" stroke-width="1.6">
+    <rect x="80" y="396" width="232" height="72" rx="4"/>
+    <rect x="328" y="396" width="176" height="72" rx="4"/>
+    <rect x="520" y="396" width="264" height="72" rx="4"/>
+  </g>
+  <g font-family="IBM Plex Mono, DejaVu Sans Mono, monospace" font-size="21" fill="#DDE3E9">
+    <text x="100" y="440">id: 42</text>
+    <text x="348" y="440">data: {"t":</text>
+    <text x="540" y="440">"caf</text>
+  </g>
+  <g font-family="IBM Plex Mono, DejaVu Sans Mono, monospace" font-size="21" fill="#6FC5A8">
+    <text x="596" y="440">é ☕"}</text>
+  </g>
+
+  <path d="M594,384 L594,480" stroke="#C4705E" stroke-width="2" stroke-dasharray="6 5"/>
+  <g font-family="IBM Plex Mono, DejaVu Sans Mono, monospace" font-size="15" fill="#C4705E">
+    <text x="608" y="500">chunk boundary, mid-character</text>
+  </g>
+
+  <g font-family="IBM Plex Mono, DejaVu Sans Mono, monospace" font-size="15" fill="#8C99A6" text-anchor="middle">
+    <text x="196" y="500">chunk 1</text>
+    <text x="416" y="500">chunk 2</text>
+  </g>
+
+  <g font-family="IBM Plex Mono, DejaVu Sans Mono, monospace" fill="#8C99A6" font-size="18">
+    <text x="80" y="580">chunked HTTP · SSE · EventSource · Last-Event-ID · model tokens</text>
+  </g>
+</svg>

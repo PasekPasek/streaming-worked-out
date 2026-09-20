@@ -1,0 +1,1216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Streaming, Worked Out — Chunked HTTP, SSE and Model Tokens in TypeScript</title>
+<meta name="description" content="An interactive walkthrough of streaming over HTTP: why chunked transfer coding lets a response stay open, what Server-Sent Events actually specifies, how EventSource reconnection and Last-Event-ID work, how an AI model&#39;s tokens arrive as SSE, and how to consume a stream in TypeScript without losing a character to a chunk boundary.">
+<meta name="author" content="Pawe&#322; Pasek">
+<link rel="canonical" href="https://pasekpasek.github.io/streaming-worked-out/">
+
+<meta property="og:type" content="article">
+<meta property="og:title" content="Streaming, Worked Out">
+<meta property="og:description" content="Chunked HTTP, Server-Sent Events and model tokens, derived from three facts about any stream. The parser and the decoder are verified against real running code.">
+<meta property="og:url" content="https://pasekpasek.github.io/streaming-worked-out/">
+<meta property="og:image" content="https://pasekpasek.github.io/streaming-worked-out/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="An SSE stream being consumed in chunks, with a partial line held in the parser buffer.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Streaming, Worked Out">
+<meta name="twitter:description" content="Chunked HTTP, Server-Sent Events and model tokens, derived from three facts about any stream. The parser and the decoder are verified against real running code.">
+<meta name="theme-color" content="#1A2028">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Streaming, Worked Out",
+  "description": "An interactive walkthrough of streaming over HTTP: chunked transfer coding, the Server-Sent Events wire format, EventSource reconnection and Last-Event-ID, AI model token streaming, and consuming a stream with fetch and ReadableStream in TypeScript.",
+  "author": { "@type": "Person", "name": "Pawe\u0142 Pasek", "url": "https://github.com/PasekPasek" },
+  "inLanguage": "en",
+  "keywords": "Server-Sent Events, SSE, EventSource, streaming, chunked transfer encoding, TypeScript, ReadableStream, TextDecoder, Last-Event-ID, AI model streaming, WebSocket",
+  "about": { "@type": "Thing", "name": "Server-Sent Events" }
+}
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Serif:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+
+<style>
+:root{
+  /* plate & wells */
+  --plate:#1A2028; --well:#141A21; --riser:#222B35; --sunk:#1D242C;
+  --etch:#2C3743; --etch-lit:#3D4B5A;
+  /* ink */
+  --ink:#DDE3E9; --ink-dim:#8C99A6;
+  /* instrumentation: warm = energised, cold = stored */
+  --live:#6FC5A8; --stored:#7FA7C4; --warn:#C98A44;
+  --idle-line:#3A4552; --idle-ink:#93A0AD; --fail:#C4705E;
+  /* syntax */
+  --c-key:#6FC5A8; --c-str:#83C79A; --c-com:#8C99A6; --c-fn:#8FB8E8; --c-typ:#DFAF72;
+  --r:2px;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+body{margin:0;background:var(--plate);color:var(--ink);
+  font-family:"IBM Plex Serif",Georgia,"Times New Roman",serif;
+  font-size:17px;line-height:1.68;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:780px;margin:0 auto;padding:0 20px 96px}
+a{color:var(--live);text-decoration:none;border-bottom:1px solid rgba(240,169,76,.35)}
+a:hover{border-bottom-color:var(--live)}
+
+h1{font-size:clamp(34px,7vw,54px);line-height:1.02;font-weight:600;
+   letter-spacing:-.02em;margin:0 0 20px;max-width:15ch}
+h2{font-size:clamp(22px,4.4vw,28px);line-height:1.2;font-weight:600;
+   letter-spacing:-.01em;margin:0}
+h3{font-size:18px;font-weight:600;margin:32px 0 8px}
+h4{font-family:"IBM Plex Mono",ui-monospace,monospace;
+   font-size:11px;font-weight:500;letter-spacing:.06em;
+   margin:0 0 10px;color:var(--ink-dim)}
+p{margin:0 0 16px;max-width:66ch}
+.lead{font-size:19.5px;line-height:1.6}
+.muted{color:var(--ink-dim)}
+code,pre,.mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace}
+p code,li code,td code,small code{font-size:.86em;background:var(--riser);color:var(--ink);
+  padding:1px 5px;border-radius:var(--r);border:1px solid var(--etch)}
+strong{font-weight:600;color:#F1F5F8}
+em{font-style:italic}
+
+header{padding:78px 0 6px}
+.kicker{font-family:"IBM Plex Mono",monospace;font-size:12.5px;letter-spacing:.02em;
+  color:var(--ink-dim);margin:0 0 22px}
+
+/* ---- datum rules between sections ---- */
+section{padding-top:56px;border-top:1px solid var(--etch);margin-top:56px}
+.sec-head{display:flex;gap:16px;align-items:baseline;margin-bottom:24px}
+.sec-num{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--live);
+  padding-top:5px;flex:none;letter-spacing:.04em;opacity:.8}
+ul.plain,ol.plain{margin:0 0 16px;padding-left:22px;max-width:66ch}
+ul.plain li,ol.plain li{margin-bottom:9px}
+
+pre{background:var(--riser);border:1px solid var(--etch);
+    border-left:2px solid var(--etch-lit);
+    border-radius:var(--r);padding:16px 18px;overflow-x:auto;font-size:13.5px;
+    line-height:1.7;margin:20px 0;color:var(--ink)}
+.c-key{color:var(--c-key)}.c-str{color:var(--c-str)}
+.c-com{color:var(--c-com);font-style:italic}
+.c-fn{color:var(--c-fn)}.c-typ{color:var(--c-typ)}
+.src{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--ink-dim);margin:-12px 0 20px}
+
+/* ---- instruments: recessed wells machined into the plate ---- */
+.demo{position:relative;background:var(--well);
+  border:1px solid var(--etch);border-radius:var(--r);
+  padding:20px;margin:26px 0;
+  box-shadow:inset 0 1px 0 rgba(0,0,0,.5), inset 0 0 40px rgba(0,0,0,.35);
+  background-image:linear-gradient(rgba(148,178,208,.045) 1px,transparent 1px),
+                   linear-gradient(90deg,rgba(148,178,208,.045) 1px,transparent 1px);
+  background-size:32px 32px;
+  background-position:-1px -1px}
+.demo::before,.demo::after{content:"";position:absolute;width:11px;height:11px;
+  border-color:var(--etch-lit);border-style:solid}
+.demo::before{top:-1px;left:-1px;border-width:1px 0 0 1px}
+.demo::after{bottom:-1px;right:-1px;border-width:0 1px 1px 0}
+.pane{background:#191F26;border:1px solid var(--etch);
+  border-radius:var(--r);padding:13px;min-width:0;
+  box-shadow:inset 0 1px 0 rgba(0,0,0,.4);
+  transition:border-color .25s ease,box-shadow .25s ease}
+.pane.hot{border-color:rgba(240,169,76,.6);
+  box-shadow:inset 0 1px 0 rgba(0,0,0,.4), 0 0 16px -6px rgba(240,169,76,.45)}
+
+.rows{list-style:none;margin:0;padding:0;font-family:"IBM Plex Mono",monospace;font-size:12px}
+.rows li{padding:5px 8px;background:var(--riser);border:1px solid var(--etch);
+  border-radius:var(--r);margin-bottom:5px;
+  display:flex;justify-content:space-between;gap:8px;align-items:baseline;
+  overflow-wrap:anywhere}
+.rows li.inv{border-left:2px solid var(--stored);color:#CBDCE8}
+.rows li.fx{border-left:2px solid var(--live);color:#F0E2CE}
+.rows li.pend{border-left:2px solid var(--warn)}
+.rows li.bad{border-left:2px solid var(--fail);color:#E8CCC4}
+.rows li .who{color:var(--ink-dim);font-size:10.5px;flex:none}
+.rows li .why{display:block;color:var(--idle-ink);font-size:10.5px;margin-top:3px}
+.empty{font-size:11.5px;color:var(--idle-ink);opacity:.6;
+  font-family:"IBM Plex Mono",monospace;padding:4px 2px}
+
+/* ---- machined controls ---- */
+.controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;align-items:center}
+button{font-family:"IBM Plex Mono",monospace;font-size:12.5px;font-weight:500;
+  letter-spacing:.01em;
+  background:linear-gradient(var(--riser),#1C242C);
+  color:var(--ink);border:1px solid var(--etch-lit);
+  padding:9px 14px;border-radius:var(--r);cursor:pointer;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05);
+  transition:border-color .16s ease,color .16s ease,background .16s ease}
+button:hover:not(:disabled){border-color:var(--live);color:var(--live)}
+button.ghost{background:transparent;color:var(--ink-dim);border-color:var(--etch)}
+button.ghost:hover:not(:disabled){color:var(--live);border-color:var(--etch-lit)}
+button.mini{font-size:11.5px;padding:6px 11px}
+button:disabled{opacity:.3;cursor:not-allowed}
+button:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+.hint{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-dim);
+  margin:14px 0 0;min-height:2.4em;max-width:none;line-height:1.6}
+
+.ctl{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:14px;
+  font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-dim)}
+.ctl input[type=range]{flex:1;min-width:160px;accent-color:var(--live);background:transparent}
+.ctl output{color:var(--live);min-width:66px}
+.ctlnote{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--idle-ink);
+  margin:8px 0 0;max-width:66ch;line-height:1.6}
+
+.verdict{margin-top:16px;padding:12px 14px;border-radius:var(--r);
+  background:#20261F;border:1px solid rgba(240,169,76,.5);color:var(--live);
+  font-family:"IBM Plex Mono",monospace;font-size:13px}
+
+.toc{font-family:"IBM Plex Mono",monospace;font-size:13px;line-height:2.1;
+  margin:36px 0 0;padding:0;list-style:none}
+.toc a{color:var(--ink);border-bottom:1px solid var(--etch)}
+.toc a:hover{color:var(--live);border-color:var(--live)}
+
+footer{border-top:1px solid var(--etch);margin-top:60px;padding-top:30px;
+  font-size:14px;color:var(--ink-dim)}
+
+@media (pointer:coarse){
+  button{min-height:44px;padding-top:11px;padding-bottom:11px}
+  button.mini{min-height:40px}
+}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.01ms !important;transition-duration:.01ms !important}}
+
+table.spec{width:100%;border-collapse:collapse;font-size:14px;margin:18px 0 8px}
+table.spec th{text-align:left;font-family:"IBM Plex Mono",monospace;font-size:11px;
+  letter-spacing:.05em;color:var(--ink-dim);font-weight:500;
+  border-bottom:1px solid var(--etch-lit);padding:0 12px 8px 0}
+table.spec td{padding:9px 12px 9px 0;border-bottom:1px solid var(--etch);
+  font-family:"IBM Plex Mono",monospace;font-size:12.5px;vertical-align:top}
+table.spec td:first-child{color:var(--live);white-space:nowrap}
+table.spec td.prose{font-family:"IBM Plex Serif",Georgia,serif;font-size:14.5px;color:var(--ink)}
+table.spec td.num{color:var(--ink)}
+.tablewrap{overflow-x:auto}
+
+.quote{border-left:2px solid var(--live);padding:2px 0 2px 16px;margin:18px 0;
+  color:#CFE6DC;font-style:italic}
+.caveat{border-left:2px solid var(--warn);padding:2px 0 2px 14px;margin:20px 0;
+  color:var(--ink-dim);font-size:15px;max-width:66ch}
+
+/* ---- the three truths ---- */
+.truths{list-style:none;counter-reset:t;margin:22px 0;padding:0;max-width:66ch}
+.truths li{counter-increment:t;position:relative;padding:14px 16px 14px 52px;margin-bottom:10px;
+  background:var(--sunk);border:1px solid var(--etch);border-left:2px solid var(--stored);border-radius:var(--r)}
+.truths li::before{content:counter(t,decimal-leading-zero);position:absolute;left:16px;top:15px;
+  font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--stored)}
+.truths li p{margin:6px 0 0;color:var(--ink-dim);font-size:15.5px}
+
+/* ---- the dependency map ---- */
+.mapwrap{overflow-x:auto}
+.map{display:block;width:100%;min-width:560px;height:auto}
+.map text{font-family:"IBM Plex Mono",monospace;font-size:10.5px;fill:var(--idle-ink)}
+.map .ab rect{fill:#241F17;stroke:var(--live);stroke-width:1.3}
+.map .ab text{fill:var(--live)}
+.map .ab{cursor:pointer}
+.map .ab:hover rect{fill:#2E2519}
+.map .ab.root rect{fill:var(--sunk);stroke:var(--stored);stroke-width:1.2}
+.map .ab.root text{fill:#CBDCE8}
+.map .ab.root:hover rect{fill:#1B2229}
+.map .ab:focus{outline:none}
+.map .ab:focus rect{stroke-width:2.5}
+.map .goal rect{fill:var(--riser);stroke:var(--etch-lit);stroke-dasharray:4 3}
+.map .goal text{fill:var(--ink)}
+.map .e{stroke:var(--idle-line);stroke-width:1.2;fill:none;marker-end:url(#m-arr)}
+.mapkey{display:flex;gap:20px;flex-wrap:wrap;margin-top:14px;
+  font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--ink-dim)}
+.mapkey span{display:flex;align-items:center;gap:7px}
+.mapkey i{width:11px;height:11px;border-radius:2px;display:inline-block}
+.mapkey i.root{background:var(--sunk);border:1.5px solid var(--stored)}
+.mapkey i.on{background:#241F17;border:1.5px solid var(--live)}
+
+/* ---- timelines ---- */
+.tlwrap{overflow-x:auto;margin-top:6px}
+.tlwrap,.mapwrap,.tablewrap,pre{scrollbar-color:var(--etch-lit) transparent}
+.tl{display:block;width:100%;min-width:520px;height:auto}
+.tl text{font-family:"IBM Plex Mono",monospace;font-size:10.5px;fill:var(--ink-dim)}
+.tl .axis{stroke:var(--etch-lit);stroke-width:1}
+.tl .grid{stroke:var(--etch);stroke-width:1}
+.tl .busy{fill:rgba(240,169,76,.18);stroke:var(--live);stroke-width:1}
+.tl .want{stroke:var(--stored);stroke-width:1.5;stroke-dasharray:3 3}
+.tl .ran{fill:var(--live)}
+.tl .job{fill:#241F17;stroke:var(--live);stroke-width:1}
+.tl .job.wait{fill:none;stroke:var(--etch-lit);stroke-dasharray:3 3}
+.tl .cb{stroke:var(--stored);stroke-width:2}
+.tl .lbl{fill:var(--ink)}
+
+/* ---- source listings that light up ---- */
+pre.lit{padding:12px 0}
+pre.lit .ln{display:block;padding:0 16px;min-height:1.7em;border-left:2px solid transparent;white-space:pre}
+pre.lit .ln.on{background:#2B2114;border-left-color:var(--live);color:#F6E6CF}
+pre.lit .ln.bad{background:#27201A;border-left-color:var(--warn)}
+
+/* ---- simulators ---- */
+.simgrid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(0,1fr);gap:14px;margin-top:14px}
+@media (max-width:680px){.simgrid{grid-template-columns:1fr}}
+.simgrid pre{margin:0;font-size:12px;line-height:1.65;background:var(--well)}
+/* long lines wrap with a hanging indent instead of hiding behind a scrollbar */
+.simgrid pre.lit .ln{white-space:pre-wrap;overflow-wrap:anywhere;padding-left:calc(12px + 4ch);text-indent:-4ch;padding-right:10px}
+.qgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}
+@media (max-width:680px){.qgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.qgrid .pane{padding:10px}
+.qgrid .pane h4{margin-bottom:7px;font-size:10.5px}
+.qgrid .wide{grid-column:1/-1}
+ol.out{margin:0;padding:0 0 0 26px;font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink);columns:2 180px;column-gap:28px}
+ol.out li{padding:1px 0;break-inside:avoid}
+ol.out li::marker{color:var(--idle-ink);font-size:10.5px}
+ol.out li.new{color:var(--live)}
+.lp{display:block;width:100%;max-width:260px;height:auto;margin:0 auto}
+.lp text{font-family:"IBM Plex Mono",monospace;font-size:11px;fill:var(--idle-ink);transition:fill .25s ease}
+.lp rect{fill:var(--sunk);stroke:var(--etch-lit);stroke-width:1;transition:fill .25s ease,stroke .25s ease}
+.lp .hot rect{fill:#2B2114;stroke:var(--live);stroke-width:1.8}
+.lp .hot text{fill:var(--live)}
+.lp .ed{stroke:var(--idle-line);stroke-width:1.1;fill:none;marker-end:url(#m-arr)}
+.lp .ex rect{stroke-dasharray:3 3}
+.lane{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--idle-ink);margin:8px 0 0;max-width:none;
+  border:1px dashed var(--etch-lit);border-radius:var(--r);padding:5px 8px;text-align:center;transition:all .25s ease}
+.lane.hot{color:var(--live);border:1px solid var(--live);background:#241F17}
+.clock{font-size:11.5px;color:var(--ink-dim);margin:8px 0 0;text-align:center;max-width:none}
+.count{font-size:11.5px;color:var(--idle-ink);margin-left:auto}
+.fname{display:flex;justify-content:space-between}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="kicker">streaming — worked out</p>
+  <h1>How bytes become events, and events become tokens on a screen</h1>
+  <p class="lead">A server writes. Some time later, a browser has words on it. In between sit a
+  transfer coding, a framing rule and a decoder, and every bug in a streaming feature lives in one of
+  those three. This page derives Server-Sent Events, model token streaming and the TypeScript that
+  consumes them from three things that are always true of any stream.</p>
+  <ol class="toc">
+    <li><a href="#truths">01 — Three things always true about a stream</a></li>
+    <li><a href="#http">02 — An HTTP response that doesn't end</a></li>
+    <li><a href="#wire">03 — SSE: the wire format</a></li>
+    <li><a href="#eventsource">04 — EventSource, reconnection, and what you get for free</a></li>
+    <li><a href="#server">05 — The server side: where your events meet the socket</a></li>
+    <li><a href="#model">06 — A model's tokens are an SSE stream</a></li>
+    <li><a href="#consume">07 — Consuming a stream in TypeScript</a></li>
+    <li><a href="#alternatives">08 — SSE, WebSocket, long-polling: picking one</a></li>
+    <li><a href="#wrong">09 — What goes wrong</a></li>
+    <li><a href="#rules">10 — The whole page in rules, and scope</a></li>
+  </ol>
+</header>
+
+<section id="truths">
+  <div class="sec-head"><span class="sec-num">01</span><h2>Three things always true about a stream</h2></div>
+  <p class="lead">Streaming looks like a feature you add. It's closer to a constraint you accept:
+  the moment a response stops arriving all at once, three things become true and stay true, whether
+  the payload is log lines, stock ticks or a model's tokens.</p>
+  <ol class="truths">
+    <li>The pieces are not yours to choose. One <code>write()</code> on the server is not one
+      <code>read()</code> on the client.
+      <p>The TCP stack, the proxies in between and the client's buffer all get a vote on where the
+      boundaries fall. Code that assumes "one write, one message" works perfectly on localhost and
+      fails the first time a payload crosses an MTU or a proxy coalesces two writes. §03's sandbox
+      is this fact, one click at a time.</p></li>
+    <li>Therefore a stream needs a framing rule — something that says "this unit is complete."
+      <p>Without one you cannot distinguish "nothing more <em>yet</em>" from "nothing more
+      <em>ever</em>". SSE's rule is a blank line. The Anthropic Messages API's rule is
+      <code>content_block_stop</code>. Other protocols prefix each frame with its length. The rule
+      differs; the need for one doesn't.</p></li>
+    <li>A stream can stop in the middle, and resuming needs somebody to have remembered a position.
+      <p>The sender can't know what arrived — that's the one thing it has no access to. Only the
+      receiver knows what it saw, so the receiver has to say so on the way back in. That is the
+      entire reason the <code>Last-Event-ID</code> header exists (§04).</p></li>
+  </ol>
+  <p>Everything below is one of those three wearing a costume. A <code>data:</code> field held in a
+  buffer is fact 1; a blank line is fact 2; a <code>retry:</code> value and a reconnect header are
+  fact 3. So is a model's tool call arriving as JSON that isn't valid JSON yet.</p>
+  <div class="mapwrap">
+    <svg class="map" viewBox="0 0 610 254" role="img" aria-label="Dependency map: every later section hangs off one of the three facts about streams">
+      <g class="ab root"><a href="#truths"><rect x="15" y="10" width="150" height="30" rx="3"/><text x="90" y="30" text-anchor="middle">01 · arbitrary chunks</text></a></g>
+      <g class="ab root"><a href="#truths"><rect x="205" y="10" width="150" height="30" rx="3"/><text x="280" y="30" text-anchor="middle">02 · framing rule</text></a></g>
+      <g class="ab root"><a href="#truths"><rect x="395" y="10" width="150" height="30" rx="3"/><text x="470" y="30" text-anchor="middle">03 · resuming</text></a></g>
+
+      <path class="e" d="M90,40 L85,104"/>
+      <path class="e" d="M280,40 L235,104"/>
+      <path class="e" d="M280,40 L385,104"/>
+      <path class="e" d="M470,40 L535,104"/>
+      <path class="e" d="M90,40 L85,169"/>
+      <path class="e" d="M280,40 L235,169"/>
+      <path class="e" d="M90,40 L385,169"/>
+      <path class="e" d="M470,40 L535,169"/>
+
+      <g class="ab"><a href="#http"><rect x="25" y="110" width="120" height="26" rx="3"/><text x="85" y="127" text-anchor="middle">§02 the response</text></a></g>
+      <g class="ab"><a href="#wire"><rect x="175" y="110" width="120" height="26" rx="3"/><text x="235" y="127" text-anchor="middle">§03 the wire</text></a></g>
+      <g class="ab"><a href="#model"><rect x="325" y="110" width="120" height="26" rx="3"/><text x="385" y="127" text-anchor="middle">§06 model tokens</text></a></g>
+      <g class="ab"><a href="#eventsource"><rect x="475" y="110" width="120" height="26" rx="3"/><text x="535" y="127" text-anchor="middle">§04 reconnect</text></a></g>
+
+      <g class="ab"><a href="#consume"><rect x="25" y="175" width="120" height="26" rx="3"/><text x="85" y="192" text-anchor="middle">§07 consuming</text></a></g>
+      <g class="ab"><a href="#server"><rect x="175" y="175" width="120" height="26" rx="3"/><text x="235" y="192" text-anchor="middle">§05 the server</text></a></g>
+      <g class="ab"><a href="#wrong"><rect x="325" y="175" width="120" height="26" rx="3"/><text x="385" y="192" text-anchor="middle">§09 what breaks</text></a></g>
+      <g class="ab"><a href="#alternatives"><rect x="475" y="175" width="120" height="26" rx="3"/><text x="535" y="192" text-anchor="middle">§08 alternatives</text></a></g>
+
+      <g class="goal"><a href="#rules"><rect x="225" y="220" width="160" height="26" rx="3"/><text x="305" y="237" text-anchor="middle">§10 the whole thing</text></a></g>
+    </svg>
+  </div>
+  <div class="mapkey">
+    <span><i class="root"></i> the three facts</span>
+    <span><i class="on"></i> a section derived from one</span>
+    <span>click any box to jump to it</span>
+  </div>
+</section>
+
+<section id="http">
+  <div class="sec-head"><span class="sec-num">02</span><h2>An HTTP response that doesn't end</h2></div>
+  <p class="lead">Before any of the streaming-specific machinery, one thing has to be true: the
+  server must be allowed to keep writing to a response it has already started. That isn't a trick
+  played on HTTP. It's a transfer coding, specified, and every streaming protocol on this page rests
+  on it.</p>
+  <p>An ordinary response announces its size up front with <code>Content-Length</code>, which the
+  server can only do if it already knows the size — which it doesn't, if the content is still being
+  produced. The alternative is chunked transfer coding, and RFC 9112 states its purpose exactly:</p>
+  <p class="quote">"Chunked enables content streams of unknown size to be transferred as a sequence
+  of length-delimited buffers, which enables the sender to retain connection persistence and the
+  recipient to know when it has received the entire message."</p>
+  <p class="src">Source: <a href="https://www.rfc-editor.org/rfc/rfc9112#section-7.1">RFC 9112 §7.1 —
+  HTTP/1.1 chunked transfer coding</a>. The coding "is complete when a chunk with a chunk-size of
+  zero is received"; until that zero-length chunk arrives, the message is simply still going.</p>
+  <p>That last clause is what a streaming endpoint exploits: it just never sends the terminating
+  chunk. In Node you rarely touch any of this directly — writing to the response after the headers
+  have gone out is enough — but two calls matter:</p>
+  <pre class="lit"><span class="ln">res.writeHead(200, {</span><span class="ln">  'content-type': 'text/event-stream',</span><span class="ln">  'cache-control': 'no-cache',</span><span class="ln">  connection: 'keep-alive',</span><span class="ln">})</span><span class="ln">res.flushHeaders()   // send the headers NOW, don't wait for the first body write</span><span class="ln"></span><span class="ln">res.write('data: first\n\n')   // ...and the response stays open</span></pre>
+  <p><code>flushHeaders()</code> is the one people miss. Without it, Node may hold the headers back
+  until it has body bytes worth sending, so a client that waits for a response before showing a
+  spinner waits for your first event instead of for the connection. On a slow first token — which is
+  every model call — that is the difference between "instant" and "broken".</p>
+  <p class="caveat">Note what is <em>not</em> here: no protocol upgrade, no handshake, no second port.
+  This is a plain <code>GET</code> that hasn't finished. Everything in §03 is a convention about what
+  to put in the body of it, which is why SSE works through anything that speaks HTTP — and why, in
+  §09, anything that speaks HTTP a little too enthusiastically can break it.</p>
+</section>
+
+<section id="wire">
+  <div class="sec-head"><span class="sec-num">03</span><h2>SSE: the wire format</h2></div>
+  <p class="lead">Server-Sent Events is fact 2, standardised. Given a response that stays open, SSE
+  is the answer to "so where does one message end?" — and the answer is a blank line.</p>
+  <p>The body is a sequence of <code>field: value</code> lines. A blank line dispatches whatever has
+  accumulated:</p>
+  <pre>id: 42
+event: task.completed
+data: {"taskId":"write-intro","actor":"writer"}
+
+data: a plain message with no id or type — dispatched as "message"
+</pre>
+  <ul class="plain">
+    <li><code>data:</code> — the payload. Several <code>data:</code> lines before the blank line are
+    joined with newlines into one event's data, which is how you send multi-line content without
+    inventing an escape.</li>
+    <li><code>event:</code> — the type a client can filter on with
+    <code>addEventListener(type, ...)</code>. Omit it and the event dispatches as the generic
+    <code>"message"</code>.</li>
+    <li><code>id:</code> — the resumption checkpoint. The client remembers the last one it saw
+    (fact 3, §04).</li>
+    <li><code>retry:</code> — how many milliseconds the client should wait before reconnecting. The
+    spec: if the value "consists of only ASCII digits", it is interpreted as an integer and sets
+    "the event stream's reconnection time".</li>
+    <li>A line starting with <code>:</code> is a comment and is ignored. Servers send these as
+    keep-alives so that idle connections aren't reaped (§09).</li>
+  </ul>
+  <p>Two details from the spec are worth quoting, because both cause real bugs. On the colon:
+  "Collect the characters on the line before the first U+003A COLON character (:), and let field be
+  that string" — the field name is everything before the <em>first</em> colon, so a JSON payload
+  full of colons is safe on a <code>data:</code> line. And on the terminator:</p>
+  <p class="quote">"Note that the last still has to end with a blank line, the end of the stream is
+  not enough to trigger the dispatch of the last event."</p>
+  <p class="src">Source: <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html">WHATWG
+  HTML — Server-Sent Events</a>, the parsing algorithm every browser's <code>EventSource</code>
+  implements.</p>
+  <p>Read that twice if you are writing a server. Closing the connection does not flush the last
+  event. A server that writes <code>data: done\n</code> and hangs up has sent nothing at all, and the
+  bug looks like "the last message is missing sometimes", which is the worst kind.</p>
+
+  <div class="demo">
+    <h4>Sandbox — bytes arrive in chunks, events come out on blank lines</h4>
+    <p class="ctlnote">Fact 1 and fact 2 in one place. The server wrote one stream; the network hands
+    it over in whatever pieces it likes. Click through and watch the middle panel — that's the
+    half-finished line the parser is holding and cannot act on. An event appears on the right only
+    when a <em>blank line</em> arrives.</p>
+    <div class="simgrid">
+      <div class="pane">
+        <h4>the stream, as the server wrote it</h4>
+        <pre data-sse-stream style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+      </div>
+      <div class="pane">
+        <h4>parser buffer — an incomplete line</h4>
+        <pre data-sse-buf style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--warn)">(empty)</pre>
+        <h4 style="margin-top:14px">dispatched to the client</h4>
+        <ul class="rows" data-sse-out><li class="empty">(nothing yet)</li></ul>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" data-sse-next>receive next chunk</button>
+      <button type="button" class="ghost" data-sse-reset>reset</button>
+    </div>
+    <p class="hint" data-sse-hint>Five chunks. The first one is cut in the middle of a field name.</p>
+  </div>
+  <p class="src">That sandbox runs the parser in this repo's <code>test-model.ts</code>, which checks
+  it against a real <code>node:http</code> server — including an event deliberately split across two
+  TCP-level writes — over a real <code>fetch</code> + <code>ReadableStream</code> client.</p>
+</section>
+
+<section id="eventsource">
+  <div class="sec-head"><span class="sec-num">04</span><h2>EventSource, reconnection, and what you get for free</h2></div>
+  <p class="lead">Fact 3 says resuming needs the receiver to remember a position. The browser will do
+  that for you, in about two lines — as long as you know what it does and, more importantly, what it
+  refuses to do.</p>
+  <pre class="lit"><span class="ln">const es = new EventSource("/events");</span><span class="ln">es.onmessage = (e) =&gt; { const ev = JSON.parse(e.data); handleEvent(ev); };</span><span class="ln">es.addEventListener("task.completed", (e) =&gt; { /* only `event: task.completed` */ });</span></pre>
+  <p>What you get for free: parsing, dispatch by event type, and automatic reconnection. When the
+  connection drops, the browser waits the reconnection time (default, or whatever a
+  <code>retry:</code> line last set) and opens the request again — this time announcing where it got
+  to. The spec is explicit about the mechanism:</p>
+  <p class="quote">"The <code>Last-Event-ID</code> HTTP request header reports an
+  <code>EventSource</code> object's last event ID string to the server when the user agent is to
+  reestablish the connection."</p>
+  <p class="src">Source: <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html">WHATWG
+  HTML — Server-Sent Events</a>.</p>
+  <p>So resumption is a contract with two halves, and the browser only holds up one of them. It will
+  send the header; whether anything useful happens is entirely down to your server reading it and
+  starting from there. A server that ignores <code>Last-Event-ID</code> and replays from the top
+  will deliver duplicates, forever, every time a laptop lid closes.</p>
+
+  <h3>What EventSource will not do</h3>
+  <ul class="plain">
+    <li><strong>Custom headers.</strong> There is no way to set one — including
+    <code>Authorization</code>. Your options are a cookie, a token in the query string (which lands
+    in access logs), or abandoning <code>EventSource</code> for <code>fetch</code> and parsing the
+    stream yourself (§07). Most production SSE code ends up in that third bucket, and this is
+    usually the reason.</li>
+    <li><strong>Anything but GET.</strong> No request body, so a streaming endpoint that needs a
+    large input — a model prompt, for instance — cannot use <code>EventSource</code> at all.</li>
+    <li><strong>Give up.</strong> It reconnects indefinitely. If your server is down, that is a
+    client politely retrying forever; closing it is your job, via <code>es.close()</code>.</li>
+  </ul>
+
+  <h3>The other design: replay everything</h3>
+  <p>Resumption by id is not the only workable answer. A server holding a small bounded buffer can
+  simply hand every new connection the whole buffer and let the client sort it out — which is what
+  <code>4th-devs</code> does for its agent dashboard, deliberately: the client re-renders from
+  scratch and de-duplicates by id, so exact resumption never has to be the server's job. It is a
+  legitimate trade, and the sandbox below is the cost of getting the client half wrong.</p>
+
+  <div class="demo">
+    <h4>Sandbox — drop the connection, then reconnect</h4>
+    <p class="ctlnote">Receive a few events, hit "drop", then reconnect in each mode. With
+    <code>Last-Event-ID</code> the server sends only what you missed. With replay-everything it
+    re-sends the lot, which is fine — right up until you untick the client-side dedup, which is the
+    line of code everyone forgets.</p>
+    <div class="ctl">
+      <label><input type="radio" name="rs-mode" value="lastid" checked> server honours Last-Event-ID</label>
+      <label><input type="radio" name="rs-mode" value="replay"> server replays its whole buffer</label>
+      <label><input type="checkbox" data-rs-dedup checked> client de-duplicates by id</label>
+    </div>
+    <div class="controls">
+      <button type="button" data-rs-next>server sends next event</button>
+      <button type="button" data-rs-drop>drop the connection</button>
+      <button type="button" data-rs-reconnect disabled>reconnect</button>
+      <button type="button" class="ghost" data-rs-reset>reset</button>
+    </div>
+    <div class="qgrid">
+      <div class="pane"><h4>server log</h4><ul class="rows" data-rs-server><li class="empty">(empty)</li></ul></div>
+      <div class="pane wide"><h4>what the client has</h4><ul class="rows" data-rs-client><li class="empty">(empty)</li></ul></div>
+    </div>
+    <p class="hint" data-rs-verdict>Connected. Send a few events, then drop.</p>
+  </div>
+</section>
+
+<section id="server">
+  <div class="sec-head"><span class="sec-num">05</span><h2>The server side: where your events meet the socket</h2></div>
+  <p class="lead">Writing the server is short enough to fit on a slide, which is exactly why the two
+  lines that aren't about writing — the keep-alive and the cleanup — are the ones that get left
+  out.</p>
+  <p>Here is a whole SSE handler from a real codebase, quoted unmodified:</p>
+  <pre class="lit"><span class="ln">res.writeHead(200, {</span><span class="ln">  'content-type': 'text/event-stream',</span><span class="ln">  'cache-control': 'no-cache',</span><span class="ln">  connection: 'keep-alive',</span><span class="ln">})</span><span class="ln">res.flushHeaders()</span><span class="ln">for (const past of replay()) res.write(`data: ${JSON.stringify(past)}\n\n`)</span><span class="ln">const unsubscribe = subscribe(event =&gt; res.write(`data: ${JSON.stringify(event)}\n\n`))</span></pre>
+  <p class="src">Source: <a href="https://github.com/i-am-alice/4th-devs/blob/main/05_01_agent_graph/src/server.ts">4th-devs,
+  05_01_agent_graph/src/server.ts</a> (<code>sseHandler</code>).</p>
+  <p>The last line is the interesting one, and it is the seam this whole page sits on. On its left,
+  <code>subscribe</code> belongs to an in-process event bus that has no idea who is listening — that
+  is event-driven architecture, and it has
+  <a href="https://pasekpasek.github.io/event-driven-architecture-worked-out/">a page of its
+  own</a>. On its right, <code>res.write</code> is one socket belonging to one identified browser.
+  Swap the right-hand side for a Kafka producer and the left-hand side doesn't change. SSE is the
+  transport; the bus is the architecture; that one line is the adapter between them.</p>
+
+  <h3>The two lines that aren't in the snippet</h3>
+  <pre class="lit"><span class="ln">// 1. Keep-alive: a comment line, ignored by the parser, that keeps the bytes flowing</span><span class="ln">//    so idle proxies and load balancers don't reap the connection (§09).</span><span class="ln">const ping = setInterval(() =&gt; res.write(': keep-alive\n\n'), 15_000)</span><span class="ln"></span><span class="ln">// 2. Cleanup: without this, every disconnect leaks a listener and a timer, and the</span><span class="ln">//    bus keeps writing to a dead socket. The leak is invisible until it isn't.</span><span class="ln">req.on('close', () =&gt; { clearInterval(ping); unsubscribe(); })</span></pre>
+  <p>The cleanup is not optional bookkeeping. A subscriber list that only ever grows is a memory
+  leak <em>and</em> a slow CPU leak — each dead connection still gets serialised into on every
+  event — and it presents in production as "the dashboard gets slower the longer it's been up",
+  which nobody debugs on the first day.</p>
+</section>
+
+<section id="model">
+  <div class="sec-head"><span class="sec-num">06</span><h2>A model's tokens are an SSE stream</h2></div>
+  <p class="lead">"The model streams its response" is §03 with a schema. Set <code>stream: true</code>
+  on an Anthropic Messages API call and the response body is exactly a
+  <code>text/event-stream</code> — same blank lines, same <code>event:</code> and <code>data:</code>
+  fields, same buffering problem. What's added is that the event types and payloads are documented
+  rather than ad hoc.</p>
+  <p>One turn is a fixed sequence: <code>message_start</code> (the message shell, with an empty
+  content array), then per content block <code>content_block_start</code> → repeated
+  <code>content_block_delta</code> → <code>content_block_stop</code>, then <code>message_delta</code>
+  (carrying the final <code>stop_reason</code>) and <code>message_stop</code>. A <code>ping</code>
+  event may appear between deltas as a keep-alive with no content of its own — the same job as the
+  <code>: keep-alive</code> comment line in §05, promoted to a typed event.</p>
+  <p>A tool call is a content block whose <code>content_block_start</code> has
+  <code>"type": "tool_use"</code> and a <em>partial</em>, growing set of arguments: each
+  <code>content_block_delta</code> for that block carries an <code>input_json_delta</code> with a
+  <code>partial_json</code> string fragment, not a complete value. The fragments concatenate, and are
+  only guaranteed parseable once <code>content_block_stop</code> closes the block.</p>
+  <p>Which is fact 2 again, one level up the stack. The blank line told you a <em>line-oriented</em>
+  unit was complete; <code>content_block_stop</code> tells you a <em>semantic</em> unit is complete.
+  Both exist because the alternative — guessing from the absence of more bytes — cannot distinguish
+  "not yet" from "never". A client that runs <code>JSON.parse</code> on each fragment as it arrives
+  is making exactly that guess, and it will be wrong on every tool call with more than one delta.</p>
+
+  <div class="demo">
+    <h4>Sandbox — stepping through a real captured tool-call turn</h4>
+    <p class="ctlnote">Press "next chunk" repeatedly and watch the lower-right panel: the tool's
+    arguments arrive as a string that is <em>not valid JSON</em> until the block closes. That is the
+    whole reason a client accumulates deltas instead of parsing each one.</p>
+    <div class="simgrid">
+      <div class="pane">
+        <h4>SSE event</h4>
+        <pre data-ai-event style="margin:0">(press "next chunk")</pre>
+      </div>
+      <div class="pane">
+        <h4>accumulated so far</h4>
+        <div data-ai-text style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;white-space:pre-wrap"></div>
+        <h4 style="margin-top:14px">tool input (raw, may not be valid JSON yet)</h4>
+        <div data-ai-tool style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;white-space:pre-wrap;color:var(--stored)"></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" data-ai-next>next chunk</button>
+      <button type="button" class="ghost" data-ai-reset>reset</button>
+    </div>
+    <p class="hint" data-ai-hint>Quoted verbatim from Anthropic's Messages API streaming
+    documentation ("Streaming request with tool use") — see
+    <code>fixtures/ai-stream-tool-call.json</code> for the exact bytes and their source.</p>
+  </div>
+  <p class="src">Source: <a href="https://platform.claude.com/docs/en/build-with-claude/streaming">Anthropic
+  Messages API — streaming</a>. The fixture is quoted from that published documentation, not captured
+  from a live API call; <code>fixtures/build-fixture.mjs</code> rebuilds it from
+  <code>fixtures/ai-stream-raw.txt</code>.</p>
+</section>
+
+<section id="consume">
+  <div class="sec-head"><span class="sec-num">07</span><h2>Consuming a stream in TypeScript</h2></div>
+  <p class="lead">§04 explained why real code often can't use <code>EventSource</code>: no headers,
+  no request body, GET only. The replacement is <code>fetch</code> plus the response's
+  <code>ReadableStream</code> — thirty lines, and one of them is a trap.</p>
+  <pre class="lit"><span class="ln">const res = await fetch("/v1/messages", {</span><span class="ln">  method: "POST",                       // EventSource cannot do this</span><span class="ln">  headers: { authorization: `Bearer ${token}` },  // nor this</span><span class="ln">  body: JSON.stringify({ stream: true, messages }),</span><span class="ln">  signal: controller.signal,            // nor cancellation</span><span class="ln">});</span><span class="ln"></span><span class="ln">const reader = res.body!.getReader();</span><span class="ln">const decoder = new TextDecoder();</span><span class="ln">const parser = createSseParser();</span><span class="ln"></span><span class="ln">for (;;) {</span><span class="ln">  const { value, done } = await reader.read();</span><span class="ln">  if (done) break;</span><span class="ln">  for (const event of parser.push(decoder.decode(value, { stream: true }))) {</span><span class="ln">    handle(event);</span><span class="ln">  }</span><span class="ln">}</span></pre>
+  <p>Two buffers are in play here and they are easy to confuse. The <em>parser</em> buffers a partial
+  line until a newline arrives (§03). The <em>decoder</em> buffers partial bytes until a whole
+  character arrives — and that is what <code>{ stream: true }</code> buys. The Encoding standard
+  spells out the contract:</p>
+  <p class="quote">"The method can be invoked zero or more times with options's stream set to true,
+  and then once without options's stream (or set to false), to process a fragmented input."</p>
+  <p class="src">Source: <a href="https://encoding.spec.whatwg.org/#dom-textdecoder-decode">WHATWG
+  Encoding — <code>TextDecoder.decode()</code></a>.</p>
+  <p>Drop that option and the code still works — on English text. UTF-8 encodes anything outside
+  ASCII as two to four bytes, and fact 1 says the chunk boundary can land anywhere, including
+  between them. A decoder told the input is complete does the only thing it can with half a
+  character: replaces it with <code>U+FFFD</code>, the replacement character. The bytes are gone;
+  no later chunk can repair them.</p>
+
+  <div class="demo">
+    <h4>Sandbox — a character cut in half by the network</h4>
+    <p class="ctlnote">One string, one deliberate split in the middle of a multi-byte character.
+    Step through and compare the panels: the left decoder is told each chunk is complete, the right
+    one is told more is coming. Watch the left panel produce a � it can never take back — and note
+    that both decoders received exactly the same bytes.</p>
+    <div class="simgrid">
+      <div class="pane">
+        <h4>bytes arriving</h4>
+        <pre data-u8-bytes style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11.5px"></pre>
+      </div>
+      <div class="pane">
+        <h4>decode(chunk) — no stream option</h4>
+        <pre data-u8-naive style="margin:0;white-space:pre-wrap;color:var(--fail);font-size:15px">(nothing yet)</pre>
+        <h4 style="margin-top:14px">decode(chunk, { stream: true })</h4>
+        <pre data-u8-stream style="margin:0;white-space:pre-wrap;color:var(--live);font-size:15px">(nothing yet)</pre>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" data-u8-next>receive next chunk</button>
+      <button type="button" class="ghost" data-u8-reset>reset</button>
+    </div>
+    <p class="hint" data-u8-verdict>Four chunks. The third boundary falls inside the three-byte ☕.</p>
+  </div>
+
+  <h3>Cancellation, which is not optional</h3>
+  <p>A streaming request that the user navigated away from is still running, still costing money if
+  a model is on the other end, and still holding a connection. <code>AbortController</code> is the
+  only thing that stops it:</p>
+  <pre class="lit"><span class="ln">const controller = new AbortController();</span><span class="ln">// ...pass controller.signal to fetch, then, whenever the user leaves:</span><span class="ln">controller.abort();   // closes the connection; the pending read() rejects with AbortError</span></pre>
+  <p>Wrap the read loop in a <code>try/catch</code> that treats <code>AbortError</code> as a normal
+  exit rather than a failure, or every cancelled stream reports itself as a crash to your error
+  tracker.</p>
+</section>
+
+<section id="alternatives">
+  <div class="sec-head"><span class="sec-num">08</span><h2>SSE, WebSocket, long-polling: picking one</h2></div>
+  <p class="lead">SSE's limitations read like weaknesses in a feature comparison and behave like
+  strengths in an operations review. The honest summary is that one of them is a real constraint and
+  the rest are someone else's problem.</p>
+  <div class="tablewrap"><table class="spec">
+    <thead><tr><th>Transport</th><th class="prose">What it is</th><th class="prose">Pick it when</th></tr></thead>
+    <tbody>
+      <tr><td>SSE</td>
+        <td class="prose">A GET that never finishes, in a text format. One direction, server to
+          client. Reconnection and resumption are in the spec.</td>
+        <td class="prose">The data flows one way: notifications, progress, logs, model tokens. It is
+          ordinary HTTP, so proxies, auth, compression and observability all already work.</td></tr>
+      <tr><td>WebSocket</td>
+        <td class="prose">A protocol upgrade to a persistent, bidirectional, framed connection —
+          no longer HTTP after the handshake.</td>
+        <td class="prose">The client genuinely sends a lot, continuously: chat typing indicators,
+          multiplayer, collaborative editing. You also inherit its infrastructure: your own
+          heartbeats, your own reconnect-and-resume, and middleboxes that understand none of it.</td></tr>
+      <tr><td>Long-polling</td>
+        <td class="prose">A request that the server holds until it has something, then answers and
+          the client immediately asks again.</td>
+        <td class="prose">You need to support something ancient, or a network that mangles
+          long-lived responses. Correct, simple, and it pays a full request round-trip per
+          message.</td></tr>
+    </tbody>
+  </table></div>
+  <p>The one genuine constraint is connection count, and it is a browser limit rather than a protocol
+  one. MDN is blunt about it:</p>
+  <p class="quote">"When not used over HTTP/2, SSE suffers from a limitation to the maximum number of
+  open connections, which can be especially painful when opening multiple tabs, as the limit is per
+  browser and is set to a very low number (6)."</p>
+  <p class="src">Source: <a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events">MDN
+  — Using server-sent events</a>. Over HTTP/2 the ceiling is negotiated and "defaults to 100", so in
+  practice this bites on HTTP/1.1 origins only — six tabs of your own app, and the seventh hangs with
+  no error anywhere.</p>
+  <p class="caveat">"But I need to send data back" is the usual argument for reaching past SSE, and
+  it is usually not an argument at all: the client can make ordinary HTTP requests whenever it likes.
+  A stream down and normal POSTs up is a perfectly good bidirectional system, and it is how every
+  streaming model API on the market works. Reach for WebSocket when the upward traffic is
+  <em>continuous</em>, not merely present.</p>
+</section>
+
+<section id="wrong">
+  <div class="sec-head"><span class="sec-num">09</span><h2>What goes wrong</h2></div>
+  <p class="lead">Streaming fails in a characteristic way: it works on your machine, works in
+  staging, and in production the events arrive in one clump at the end, or stop after a minute. Every
+  item below is a thing between your <code>res.write</code> and the browser deciding it knows better.</p>
+  <ul class="plain">
+    <li><strong>A buffering proxy.</strong> The single most common cause. nginx buffers proxied
+    responses by default, which is the right call for ordinary responses and fatal for this one: your
+    events queue up until the buffer fills or the response ends. Fix it with
+    <code>proxy_buffering off</code>, or have the app send <code>X-Accel-Buffering: no</code> so the
+    decision travels with the response rather than living in someone else's config file.</li>
+    <li><strong>Compression without flushing.</strong> A gzip layer that waits for a full window
+    before emitting does exactly what the proxy did, one layer lower. Either disable compression for
+    <code>text/event-stream</code> or make sure it flushes per write.</li>
+    <li><strong>Idle timeouts.</strong> Load balancers reap connections with no bytes on them —
+    commonly after 60 seconds. If your stream can be quiet longer than that, the keep-alive comment
+    from §05 is not a nicety, it's the thing that keeps you connected.</li>
+    <li><strong>No cleanup on disconnect.</strong> §05's <code>req.on('close', ...)</code>. Without
+    it the subscriber list grows forever and every event is serialised for sockets nobody is reading.</li>
+    <li><strong>Assuming one write is one message.</strong> Fact 1, and the reason §03's sandbox
+    exists. It works until a payload gets big or a proxy coalesces.</li>
+    <li><strong>Ignoring backpressure.</strong> <code>res.write()</code> returns <code>false</code>
+    when the kernel buffer is full, and a producer that keeps writing anyway grows an unbounded
+    queue in your process's memory. A slow client becomes your memory problem — which is the event
+    loop's business, and a whole other page:
+    <a href="https://pasekpasek.github.io/event-loop-worked-out/">event-loop-worked-out</a>.</li>
+  </ul>
+  <p class="caveat">A diagnostic worth knowing, because it splits the space in half: run
+  <code>curl -N</code> against the endpoint directly, then through your proxy. If events appear live
+  in the first and arrive in a clump in the second, stop reading your application code — nothing in
+  it is wrong.</p>
+</section>
+
+<section id="rules">
+  <div class="sec-head"><span class="sec-num">10</span><h2>The whole page in rules, and scope</h2></div>
+  <ol class="plain">
+    <li>One <code>write()</code> is not one <code>read()</code>. Anything that assumes otherwise is
+    correct on localhost and wrong in production.</li>
+    <li>Every stream needs a framing rule, because "no more bytes yet" and "no more bytes ever" look
+    identical. SSE's is a blank line; a model turn's is <code>content_block_stop</code>.</li>
+    <li>Closing the connection does not dispatch the last event. It needs its blank line, and the
+    spec says so in as many words.</li>
+    <li>Streaming over HTTP is not a hack: chunked transfer coding exists to carry "content streams
+    of unknown size". Remember <code>flushHeaders()</code>.</li>
+    <li>Resumption is a two-sided contract. The browser sends <code>Last-Event-ID</code>; if your
+    server ignores it, every reconnect replays duplicates. Replaying a bounded buffer instead is a
+    valid design, but only with a client that de-duplicates.</li>
+    <li><code>EventSource</code> cannot set headers, cannot POST, and never gives up. Real code
+    usually ends up on <code>fetch</code> + <code>ReadableStream</code> for the first of those
+    reasons.</li>
+    <li>Decode with <code>{ stream: true }</code>. A multi-byte character split across chunks becomes
+    <code>U+FFFD</code> permanently, and it only happens to text you didn't test with.</li>
+    <li>Cancel with <code>AbortController</code>, and treat <code>AbortError</code> as a normal exit.</li>
+    <li>Send keep-alive comments and clean up on <code>close</code>. One keeps proxies from reaping
+    you; the other keeps you from leaking a listener per disconnect.</li>
+    <li>If it works with <code>curl -N</code> and not through the proxy, it's the proxy. Over
+    HTTP/1.1 you also get six connections per browser, total.</li>
+  </ol>
+  <h3>Left out, on purpose</h3>
+  <ul class="plain">
+    <li><strong>The architecture on the other side of the seam.</strong> What produces the events,
+    who else consumes them, what a broker guarantees about delivery and ordering — all of that is a
+    different question from how bytes cross a socket, and it has its own page:
+    <a href="https://pasekpasek.github.io/event-driven-architecture-worked-out/">event-driven-architecture-worked-out</a>.
+    §05's <code>subscribe(event =&gt; res.write(event))</code> is the seam between the two.</li>
+    <li><strong>WebSocket in earnest.</strong> Named and compared in §08, not built. Frames, ping/pong,
+    subprotocols and scaling a stateful connection layer are a page of their own.</li>
+    <li><strong>gRPC streaming and HTTP/2 server push.</strong> Both real, both a different
+    ecosystem, and neither is what a browser talking to a JSON API reaches for.</li>
+  </ul>
+</section>
+
+<footer>
+  <p>Built by <a href="https://github.com/PasekPasek">Paweł Pasek</a>. Companion to
+  <a href="https://github.com/PasekPasek/event-loop-worked-out">event-loop-worked-out</a>,
+  <a href="https://github.com/PasekPasek/auth-worked-out">auth-worked-out</a> and
+  <a href="https://github.com/PasekPasek/event-driven-architecture-worked-out">event-driven-architecture-worked-out</a>,
+  which use the same workshop-plate design. The SSE server shape and event bus are grounded in
+  <a href="https://github.com/i-am-alice/4th-devs">4th-devs</a>, an open-source agent-orchestration
+  course repository.</p>
+</footer>
+
+</div>
+
+<script>
+/* MODEL:sse START */
+function createSseParser() {
+  let carry = '';
+  let dataBuf = '';
+  let eventType = '';
+  let lastEventId = '';
+
+  function processLine(line, out) {
+    if (line === '') {
+      if (dataBuf !== '') {
+        out.push({
+          id: lastEventId || null,
+          event: eventType || 'message',
+          data: dataBuf.endsWith('\n') ? dataBuf.slice(0, -1) : dataBuf,
+        });
+      }
+      dataBuf = '';
+      eventType = '';
+      return;
+    }
+    if (line[0] === ':') return; // comment line, e.g. a keep-alive ping
+    const colon = line.indexOf(':');
+    const field = colon === -1 ? line : line.slice(0, colon);
+    let value = colon === -1 ? '' : line.slice(colon + 1);
+    if (value[0] === ' ') value = value.slice(1);
+    if (field === 'data') dataBuf += value + '\n';
+    else if (field === 'event') eventType = value;
+    else if (field === 'id' && !value.includes('\u0000')) lastEventId = value;
+    // 'retry' is parsed by real browsers to set the reconnection time; this
+    // model doesn't drive a real reconnect timer, so it's read and ignored.
+  }
+
+  return {
+    push(chunk) {
+      carry += chunk;
+      const lines = carry.split(/\r\n|\r|\n/);
+      carry = lines.pop();
+      const out = [];
+      for (const line of lines) processLine(line, out);
+      return out;
+    },
+    get lastEventId() {
+      return lastEventId;
+    },
+    // the partial line held back until more bytes arrive; §03's sandbox displays it
+    get buffered() {
+      return carry;
+    },
+  };
+}
+/* MODEL:sse END */
+
+(() => {
+  const root = document.getElementById('wire');
+  if (!root) return;
+  const streamEl = root.querySelector('[data-sse-stream]');
+  const bufEl = root.querySelector('[data-sse-buf]');
+  const outEl = root.querySelector('[data-sse-out]');
+  const hintEl = root.querySelector('[data-sse-hint]');
+
+  // One stream, deliberately chopped where a real socket might chop it.
+  const CHUNKS = [
+    { bytes: 'id: 1\nda',
+      note: 'Two lines arrived — but the second is cut mid-word, at "da". The parser keeps that '
+          + 'fragment and waits. You cannot act on half a field name.' },
+    { bytes: 'ta: {"type":"task.started","id":"fetch-price"}\n',
+      note: 'The rest of the line landed, so the buffer is empty again and the data: field is '
+          + 'understood. Still nothing dispatched: SSE dispatches on a blank line, and none has come.' },
+    { bytes: '\n',
+      note: 'One newline, making the blank line. Now the buffered event is dispatched — three lines '
+          + 'of input became one event.' },
+    { bytes: ': keep-alive\n\n',
+      note: 'A line starting with ":" is a comment. Servers send these so idle proxies do not close '
+          + 'the connection. It dispatches nothing.' },
+    { bytes: 'id: 2\nevent: task.completed\ndata: {"id":"fetch-price"}\n\n',
+      note: 'A whole event in one chunk this time, and it names a type — so it dispatches as '
+          + '"task.completed" rather than the default "message".' },
+  ];
+  const FULL = CHUNKS.map((c) => c.bytes).join('');
+
+  let parser = createSseParser();
+  let i = 0;
+  let events = [];
+
+  function renderStream() {
+    const consumed = CHUNKS.slice(0, i).map((c) => c.bytes).join('').length;
+    streamEl.textContent = '';
+    const done = document.createElement('span');
+    done.textContent = FULL.slice(0, consumed);
+    done.style.color = 'var(--live)';
+    const todo = document.createElement('span');
+    todo.textContent = FULL.slice(consumed);
+    todo.style.opacity = '.45';
+    streamEl.append(done, todo);
+  }
+
+  function renderEvents() {
+    outEl.innerHTML = '';
+    if (!events.length) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = '(nothing yet)';
+      outEl.appendChild(li);
+      return;
+    }
+    for (const e of events) {
+      const head = document.createElement('li');
+      head.className = 'fx';
+      const type = document.createElement('span');
+      type.textContent = e.event;
+      const id = document.createElement('span');
+      id.className = 'who';
+      id.textContent = `id ${e.id ?? '—'}`;
+      head.append(type, id);
+      const data = document.createElement('li');
+      data.className = 'empty';
+      data.textContent = e.data;
+      outEl.append(head, data);
+    }
+  }
+
+  function render() {
+    renderStream();
+    const buf = parser.buffered;
+    bufEl.textContent = buf === '' ? '(empty — no partial line held)' : JSON.stringify(buf);
+    renderEvents();
+    root.querySelector('[data-sse-next]').disabled = i >= CHUNKS.length;
+  }
+
+  root.querySelector('[data-sse-next]').addEventListener('click', () => {
+    if (i >= CHUNKS.length) return;
+    const chunk = CHUNKS[i];
+    const dispatched = parser.push(chunk.bytes);
+    events.push(...dispatched);
+    i++;
+    hintEl.textContent = `Chunk ${i} of ${CHUNKS.length}: ${chunk.note}`
+      + (dispatched.length ? ` (+${dispatched.length} dispatched)` : ' (0 dispatched)');
+    render();
+  });
+  root.querySelector('[data-sse-reset]').addEventListener('click', () => {
+    parser = createSseParser();
+    i = 0;
+    events = [];
+    hintEl.textContent = 'Five chunks. The first one is cut in the middle of a field name.';
+    render();
+  });
+  render();
+})();
+
+
+(() => {
+  const root = document.getElementById('model');
+  if (!root) return;
+  const eventEl = root.querySelector('[data-ai-event]');
+  const textEl = root.querySelector('[data-ai-text]');
+  const toolEl = root.querySelector('[data-ai-tool]');
+  let chunks = [];
+  let i = 0;
+  let text = '';
+  let toolJson = '';
+
+  function render() {
+    if (i === 0) {
+      eventEl.textContent = '(press "next chunk")';
+      return;
+    }
+    const c = chunks[i - 1];
+    eventEl.textContent = `${c.event}\n${JSON.stringify(c.data, null, 2)}`;
+    textEl.textContent = text || '(no text yet)';
+    toolEl.textContent = toolJson || '(no tool call yet)';
+  }
+
+  function apply(c) {
+    if (c.event === 'content_block_delta' && c.data.delta?.type === 'text_delta') {
+      text += c.data.delta.text;
+    }
+    if (c.event === 'content_block_delta' && c.data.delta?.type === 'input_json_delta') {
+      toolJson += c.data.delta.partial_json;
+    }
+  }
+
+  fetch('fixtures/ai-stream-tool-call.json')
+    .then((r) => r.json())
+    .then((fixture) => { chunks = fixture.chunks; });
+
+  root.querySelector('[data-ai-next]').addEventListener('click', () => {
+    if (i >= chunks.length) return;
+    apply(chunks[i]);
+    i++;
+    render();
+  });
+  root.querySelector('[data-ai-reset]').addEventListener('click', () => {
+    i = 0; text = ''; toolJson = ''; render();
+  });
+})();
+</script>
+<script>
+/* MODEL:resume START */
+// What a server hands a client that reconnects, under the two designs in §04.
+// serverLog is everything the server holds; lastId is what the client announces
+// in its Last-Event-ID header ('' when it has never seen one).
+function eventsOnReconnect(mode, serverLog, lastId) {
+  if (mode === 'replay') return serverLog.slice();
+  const seen = Number(lastId);
+  if (!lastId || Number.isNaN(seen)) return serverLog.slice();
+  return serverLog.filter((e) => Number(e.id) > seen);
+}
+
+// The client half of the contract. Without de-duplication a replayed buffer
+// lands as duplicates; with it, the same bytes are harmless.
+function acceptEvents(received, incoming, dedup) {
+  const out = received.slice();
+  for (const e of incoming) {
+    if (dedup && out.some((seen) => seen.id === e.id)) continue;
+    out.push(e);
+  }
+  return out;
+}
+/* MODEL:resume END */
+
+/* MODEL:utf8 START */
+// Fact 1 applied to characters rather than lines: a chunk boundary can fall
+// inside a multi-byte UTF-8 character, and only a decoder that is told more is
+// coming can hold the leading bytes back.
+// atEnd says whether these chunks are the whole stream. It matters: the final
+// flush is what turns bytes still being held back into U+FFFD, so flushing a
+// prefix mid-stream reports a corruption that has not happened yet.
+function decodeChunks(byteChunks, streaming, atEnd) {
+  const decoder = new TextDecoder();
+  let out = '';
+  for (const bytes of byteChunks) {
+    out += decoder.decode(bytes, { stream: streaming });
+  }
+  if (streaming && atEnd) out += decoder.decode();
+  return out;
+}
+
+// One string, split at byte offsets that deliberately cut a character in half.
+function splitUtf8(text, offsets) {
+  const bytes = new TextEncoder().encode(text);
+  const chunks = [];
+  let prev = 0;
+  for (const at of [...offsets, bytes.length]) {
+    chunks.push(bytes.slice(prev, at));
+    prev = at;
+  }
+  return chunks;
+}
+/* MODEL:utf8 END */
+
+(() => {
+  const root = document.getElementById('eventsource');
+  if (!root) return;
+  const serverEl = root.querySelector('[data-rs-server]');
+  const clientEl = root.querySelector('[data-rs-client]');
+  const verdictEl = root.querySelector('[data-rs-verdict]');
+
+  const ALL = [
+    { id: '1', text: 'task.started fetch-price' },
+    { id: '2', text: 'task.completed fetch-price' },
+    { id: '3', text: 'task.started notify' },
+    { id: '4', text: 'task.completed notify' },
+    { id: '5', text: 'project.done' },
+  ];
+
+  let sent = 0;            // how many events the server has produced
+  let received = [];       // what the client holds
+  let connected = true;
+  let lastId = '';         // what the client would put in Last-Event-ID
+
+  const mode = () => root.querySelector('input[name="rs-mode"]:checked').value;
+  const dedup = () => root.querySelector('[data-rs-dedup]').checked;
+
+  function fill(el, items, emptyText) {
+    el.innerHTML = '';
+    if (!items.length) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = emptyText;
+      el.appendChild(li);
+      return;
+    }
+    for (const it of items) {
+      const li = document.createElement('li');
+      if (it.cls) li.className = it.cls;
+      const left = document.createElement('span');
+      left.textContent = it.label;
+      const right = document.createElement('span');
+      right.className = 'who';
+      right.textContent = it.note || '';
+      li.append(left, right);
+      el.appendChild(li);
+    }
+  }
+
+  function duplicates() {
+    const counts = {};
+    for (const e of received) counts[e.id] = (counts[e.id] || 0) + 1;
+    return Object.values(counts).filter((n) => n > 1).length;
+  }
+
+  function render() {
+    fill(serverEl, ALL.slice(0, sent).map((e) => ({ label: `id ${e.id}`, note: e.text })), '(empty)');
+    const dupes = {};
+    fill(clientEl, received.map((e) => {
+      dupes[e.id] = (dupes[e.id] || 0) + 1;
+      return {
+        label: `id ${e.id} · ${e.text}`,
+        note: dupes[e.id] > 1 ? 'duplicate' : '',
+        cls: dupes[e.id] > 1 ? 'bad' : 'inv',
+      };
+    }), '(empty)');
+    root.querySelector('[data-rs-next]').disabled = !connected || sent >= ALL.length;
+    root.querySelector('[data-rs-drop]').disabled = !connected;
+    root.querySelector('[data-rs-reconnect]').disabled = connected;
+  }
+
+  root.querySelector('[data-rs-next]').addEventListener('click', () => {
+    const e = ALL[sent++];
+    received = acceptEvents(received, [e], dedup());
+    lastId = e.id;
+    verdictEl.textContent = `Delivered id ${e.id}. The client's Last-Event-ID is now ${lastId}.`;
+    render();
+  });
+
+  root.querySelector('[data-rs-drop]').addEventListener('click', () => {
+    connected = false;
+    // While disconnected the server keeps producing: this is what you miss.
+    sent = Math.min(ALL.length, sent + 2);
+    verdictEl.textContent = 'Connection dropped, and the server carried on without you — it is now '
+      + `${sent} events in, while the client has ${received.length}. Reconnect and see what arrives.`;
+    render();
+  });
+
+  root.querySelector('[data-rs-reconnect]').addEventListener('click', () => {
+    const announced = lastId;
+    const incoming = eventsOnReconnect(mode(), ALL.slice(0, sent), lastId);
+    const before = received.length;
+    received = acceptEvents(received, incoming, dedup());
+    connected = true;
+    if (received.length) lastId = received[received.length - 1].id;
+    const d = duplicates();
+    verdictEl.textContent = mode() === 'lastid'
+      ? `Reconnected, announcing Last-Event-ID: ${announced || 'none'}. The server sent `
+        + `${incoming.length} event(s) — exactly the ones you missed, nothing you already had. That `
+        + 'is the contract working: the receiver said where it got to, the sender resumed there.'
+      : d
+        ? `Reconnected. The server replayed all ${incoming.length} buffered events and the client `
+          + `kept every one, so ${d} id(s) are now in the list twice. The bytes were fine; the `
+          + 'missing line of code is on the client.'
+        : `Reconnected. The server replayed all ${incoming.length} buffered events; the client `
+          + `recognised ${incoming.length - (received.length - before)} it already had and dropped `
+          + 'them. A valid design — it just moves the work to the client, and only works because '
+          + 'that checkbox is ticked.';
+    render();
+  });
+
+  root.querySelectorAll('input[name="rs-mode"], [data-rs-dedup]').forEach((i) => {
+    i.addEventListener('change', render);
+  });
+  root.querySelector('[data-rs-reset]').addEventListener('click', () => {
+    sent = 0; received = []; connected = true; lastId = '';
+    verdictEl.textContent = 'Connected. Send a few events, then drop.';
+    render();
+  });
+  render();
+})();
+
+(() => {
+  const root = document.getElementById('consume');
+  if (!root) return;
+  const bytesEl = root.querySelector('[data-u8-bytes]');
+  const naiveEl = root.querySelector('[data-u8-naive]');
+  const streamEl = root.querySelector('[data-u8-stream]');
+  const verdictEl = root.querySelector('[data-u8-verdict]');
+
+  const TEXT = 'data: {"t":"café ☕"}';
+  // 'é' is 2 bytes and '☕' is 3; the third offset cuts straight through the '☕'.
+  const CHUNKS = splitUtf8(TEXT, [8, 14, 19]);
+
+  let i = 0;
+
+  function hex(bytes) {
+    return [...bytes].map((b) => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+  }
+
+  function render() {
+    bytesEl.textContent = CHUNKS.map((c, n) => {
+      const mark = n < i ? '▸' : ' ';
+      return `${mark} chunk ${n + 1}: ${hex(c)}`;
+    }).join('\n');
+    const soFar = CHUNKS.slice(0, i);
+    const atEnd = i >= CHUNKS.length;
+    naiveEl.textContent = i ? JSON.stringify(decodeChunks(soFar, false, atEnd)) : '(nothing yet)';
+    streamEl.textContent = i ? JSON.stringify(decodeChunks(soFar, true, atEnd)) : '(nothing yet)';
+    root.querySelector('[data-u8-next]').disabled = i >= CHUNKS.length;
+  }
+
+  root.querySelector('[data-u8-next]').addEventListener('click', () => {
+    if (i >= CHUNKS.length) return;
+    i++;
+    const naive = decodeChunks(CHUNKS.slice(0, i), false, i >= CHUNKS.length);
+    if (i === CHUNKS.length) {
+      verdictEl.textContent = 'Stream over. Same bytes, both sides. The left string carries three '
+        + '� where one character used to be; the right one is the text the server sent. The '
+        + 'difference is one option, and nothing anywhere threw.';
+    } else if (naive.includes('�')) {
+      verdictEl.textContent = `Chunk ${i}: the boundary landed inside a character. The left decoder `
+        + 'was told this chunk was the whole input, so it replaced the fragment it got with � — and '
+        + 'no later chunk can undo that. The right decoder is holding those bytes back.';
+    } else {
+      verdictEl.textContent = `Chunk ${i}: this boundary fell between characters, so both decoders `
+        + 'agree. That is exactly why the bug survives code review — it needs the right text and the '
+        + 'right split.';
+    }
+    render();
+  });
+  root.querySelector('[data-u8-reset]').addEventListener('click', () => {
+    i = 0;
+    verdictEl.textContent = 'Four chunks. The split falls inside a three-byte character.';
+    render();
+  });
+  render();
+})();
+</script>
+</body>
+</html>
