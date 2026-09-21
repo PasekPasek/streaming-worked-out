@@ -68,15 +68,84 @@ Source: RFC 9112 §7.1, https://www.rfc-editor.org/rfc/rfc9112#section-7.1
 
 ## 03. SSE: the wire format
 
-Server-Sent Events is fact 2, standardised. Given a response that stays open, SSE answers "where does
-one message end?" — and the answer is a blank line.
+Given a response that stays open, SSE answers "where does one message end?" The answer is a
+blank line.
+
+SSE in one paragraph: Server-Sent Events is a text format for the body of an HTTP response that stays
+open. The server writes plain text following a few rules, and the client cuts that text into separate
+messages called events. There's no new protocol and no server library. Sending an event is a
+res.write() of a string. Data only flows one way, from server to client. The same spec also defines
+EventSource, the browser's built-in SSE client (§04). You don't have to use it: any code that reads
+the response and cuts on the same rule is an SSE client too (§07). Every AI chat UI works this way.
+
+The blank line is two newline characters. This is the whole server side of sending one event:
+
+    res.write(`data: ${JSON.stringify({ text: "The" })}\n\n`)
+
+The string ends with two \n bytes (0x0A). The first ends the line `data: {"text":"The"}`. The second
+ends a line with nothing on it, the "blank line", and that is the signal that the event is complete.
+So there are two levels: one \n ends a line (one field), and an empty line ends the whole event. You
+need both because an event can have several lines (⏎ = \n):
+
+    id: 42⏎
+    event: task.completed⏎
+    data: {"taskId":"write-intro","actor":"writer"}⏎
+    ⏎                         <- empty line: event #1 is complete
+    data: a plain message with no id or type⏎
+    ⏎                         <- event #2, dispatched as the generic "message"
+
+Why a separator is needed at all: the server always puts \n\n right after a complete event, but the
+client doesn't receive events, it receives bytes. Each read() returns whatever has arrived so far,
+and those pieces don't line up with the server's writes:
+
+    the server wrote two events, each complete and ending in \n\n
+    write() #1   data: {"text":"The"}\n\n
+    write() #2   data: {"text":" cat"}\n\n
+
+    the client got exactly the same bytes, cut in different places
+    read()  #1   data: {"text":"The"}\n\ndata: {"te
+    read()  #2   xt":" cat"}\n\n
+
+The \n\n in the middle of read #1 is not in the middle of an object. It is the end of event #1,
+where the server put it. What follows is the start of event #2, whose rest only arrives in read #2.
+
+A client that is even slightly busy sees this all the time. In a real run where the client did
+something else for 300 ms, three separate writes (50 ms apart) arrived as one read:
+
+    write()  "data: {\"text\":\"The\"}\n\n"
+    write()  "data: {\"text\":\" cat\"}\n\n"
+    write()  "data: {\"text\":\" sat\"}\n\n"
+    read()   "data: {\"text\":\"The\"}\n\ndata: {\"text\":\" cat\"}\n\ndata: {\"text\":\" sat\"}\n\n"
+
+The client keeps a buffer and cuts it on \n\n:
+
+    buffer += chunk
+    const events = buffer.split("\n\n")
+    buffer = events.pop()               // the last piece may be unfinished: keep it for later
+    for (const ev of events) show(ev)   // everything else is a complete event
+
+Traced through the two reads above:
+
+    read #1: buffer = 'data: {"text":"The"}\n\ndata: {"te'
+             split  -> ['data: {"text":"The"}', 'data: {"te']   show event #1, keep 'data: {"te'
+    read #2: buffer = 'data: {"te' + 'xt":" cat"}\n\n' = 'data: {"text":" cat"}\n\n'
+             split  -> ['data: {"text":" cat"}', '']         show event #2, keep ''
+
+Without the separator, `data: {"te` at the end of read #1 would look like a whole message and
+JSON.parse would throw on it.
+
+A real parser goes line by line instead, because it also has to handle \r\n, comments and multiple
+data: lines. The rule is the same. On the wire, curl -N shows the blank lines as gaps, and
+`curl -N ... | cat -A` shows every \n as $:
+
+    data: {"text":"The"}$
+    $
+    data: {"text":" cat"}$
+    $
+
+The fields:
 
     id: 42
-    event: task.completed
-    data: {"taskId":"write-intro","actor":"writer"}
-
-    data: a plain message with no id or type — dispatched as "message"
-
 - data: — the payload. Several data: lines before the blank line join with newlines into one event's
   data, which is how multi-line content travels without an escape.
 - event: — the type a client filters on with addEventListener(type, ...). Omit it and the event
@@ -170,8 +239,23 @@ gets slower the longer it's been up".
 ## 06. A model's tokens are an SSE stream
 
 Set stream: true on an Anthropic Messages API call and the response body is exactly a
-text/event-stream: same blank lines, same event: and data: fields, same buffering problem. What is
-added is that the event types and payloads are documented rather than ad hoc.
+text/event-stream, with the same \n\n, the same event: and data: fields and the same buffering
+problem. The difference is that the event types and payloads are documented rather than made up per
+app.
+
+Why models stream at all: a model produces its answer one token at a time, and a long answer takes
+seconds to finish. Without streaming the user watches an empty box until the last token exists. With
+streaming each piece of text goes out as its own event as soon as it's generated. The total time is
+the same. What changes is how long until the first word shows up.
+
+What is on the wire, one text fragment (⏎ = \n):
+
+    event: content_block_delta⏎
+    data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cat"}}⏎
+    ⏎
+
+The client cuts on the blank line, runs JSON.parse on the data: line and appends delta.text to the
+screen. That's the whole "typing" effect.
 
 One turn is a fixed sequence: message_start (the message shell, empty content array), then per
 content block content_block_start → repeated content_block_delta → content_block_stop, then
@@ -190,21 +274,57 @@ guessing from the absence of more bytes — cannot distinguish "not yet" from "n
 runs JSON.parse on each fragment as it arrives is making exactly that guess, and will be wrong on
 every tool call with more than one delta.
 
-The page's sandbox steps through a real captured tool-call turn, quoted verbatim from Anthropic's
-published streaming documentation (not captured from a live API call), watching the tool input
-accumulate as a string that is not valid JSON until the block closes.
+The page's sandbox feeds the raw bytes of a tool-call turn, quoted verbatim from Anthropic's
+published streaming documentation (not captured from a live API call), through the same parser as
+§03, one event at a time: raw bytes, the dispatched event, the text on screen, and the tool input
+accumulating as a string that is not valid JSON until the block closes.
 
 Source: https://platform.claude.com/docs/en/build-with-claude/streaming
+
+In a real app there are two streams, not one. The browser never calls the model API directly, because
+that would ship your API key to every visitor:
+
+    1  browser     -- POST /api/chat {messages} ------> your server
+    2  your server -- POST /v1/messages + x-api-key --> model API
+    3  model API   -- SSE: content_block_delta... ----> your server
+    4  your server -- SSE: your own events -----------> browser
+
+The simplest middle passes bytes through unchanged, since \n\n means the same thing on both hops:
+
+    app.post("/api/chat", async (req, res) => {
+      const upstream = new AbortController();
+      res.on("close", () => upstream.abort());   // browser left -> stop paying for tokens
+      const model = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": process.env.ANTHROPIC_API_KEY,   // stays on the server
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "claude-opus-5", max_tokens: 1024, stream: true, messages: req.body.messages }),
+        signal: upstream.signal,
+      });
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      res.flushHeaders();
+      for await (const chunk of model.body) res.write(chunk);   // bytes in, bytes out
+      res.end();
+    });
+
+In practice the middle usually parses the model's events, saves the answer, counts tokens and
+re-emits only what the UI needs. A model stream can't be resumed: its events carry no id: field, so
+there's no Last-Event-ID to send back. If the connection drops halfway through an answer, the answer
+is gone; you send the request again or keep the partial text. §04's machinery only applies to the
+stream your own server writes, and only if it buffers the generation and numbers its events.
 
 ## 07. Consuming a stream in TypeScript
 
 §04 explained why real code often cannot use EventSource: no headers, no request body, GET only. The
 replacement is fetch plus the response's ReadableStream.
 
-    const res = await fetch("/v1/messages", {
+    const res = await fetch("/api/chat", {           // your server (§06), never the model API directly
       method: "POST",                                 // EventSource cannot do this
-      headers: { authorization: `Bearer ${token}` },  // nor this
-      body: JSON.stringify({ stream: true, messages }),
+      headers: { authorization: `Bearer ${sessionToken}` },  // nor this (your app's login)
+      body: JSON.stringify({ messages }),
       signal: controller.signal,                      // nor cancellation
     });
 
@@ -216,9 +336,14 @@ replacement is fetch plus the response's ReadableStream.
       const { value, done } = await reader.read();
       if (done) break;
       for (const event of parser.push(decoder.decode(value, { stream: true }))) {
-        handle(event);
+        if (event.event !== "content_block_delta") continue;
+        const { delta } = JSON.parse(event.data);     // safe: the event is complete
+        if (delta.type === "text_delta") output.textContent += delta.text;
       }
     }
+
+parser.push only returns an event once its blank line has arrived, so JSON.parse never sees half a
+line. It can still see half a tool call, which is why §06 accumulates partial_json.
 
 Two buffers are in play and they are easy to confuse. The parser buffers a partial LINE until a
 newline arrives (§03). The decoder buffers partial BYTES until a whole character arrives — that is
@@ -291,7 +416,8 @@ in the first and arrive in a clump in the second, nothing in your application co
 1. One write() is not one read(). Anything that assumes otherwise is correct on localhost and wrong
    in production.
 2. Every stream needs a framing rule, because "no more bytes yet" and "no more bytes ever" look
-   identical. SSE's is a blank line; a model turn's is content_block_stop.
+   identical. SSE's is a blank line, which on the wire is just \n\n: one \n ends a field, the
+   second ends the event. A model turn's is content_block_stop.
 3. Closing the connection does not dispatch the last event. It needs its blank line, and the spec
    says so in as many words.
 4. Streaming over HTTP is not a hack: chunked transfer coding exists to carry "content streams of
@@ -304,9 +430,12 @@ in the first and arrive in a clump in the second, nothing in your application co
 7. Decode with { stream: true }. A multi-byte character split across chunks becomes U+FFFD
    permanently, and it only happens to text you did not test with.
 8. Cancel with AbortController, and treat AbortError as a normal exit.
-9. Send keep-alive comments and clean up on close. One keeps proxies from reaping you; the other
-   keeps you from leaking a listener per disconnect.
-10. If it works with curl -N and not through the proxy, it is the proxy. Over HTTP/1.1 you also get
+9. A model's reply streams to your server, and your server streams to the browser. The API key
+   never leaves the server, and a dropped model stream can't be resumed. Only the stream you write
+   yourself can carry id:s.
+10. Send keep-alive comments and clean up on close. One keeps proxies from reaping you; the other
+    keeps you from leaking a listener per disconnect.
+11. If it works with curl -N and not through the proxy, it is the proxy. Over HTTP/1.1 you also get
     six connections per browser, total.
 
 Left out, on purpose:

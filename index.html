@@ -275,6 +275,43 @@ ol.out li.new{color:var(--live)}
 .clock{font-size:11.5px;color:var(--ink-dim);margin:8px 0 0;text-align:center;max-width:none}
 .count{font-size:11.5px;color:var(--idle-ink);margin-left:auto}
 .fname{display:flex;justify-content:space-between}
+
+/* ---- making the invisible newline visible ---- */
+.nl{color:var(--warn);font-weight:500;opacity:.95;margin-left:1px;
+  font-family:"DejaVu Sans Mono","Segoe UI Symbol","Apple Symbols",system-ui,sans-serif;font-size:1.15em;line-height:1}
+.nl.end{background:rgba(201,138,68,.18);border-radius:2px;padding:0 2px}
+.defn{background:var(--sunk);border:1px solid var(--etch);border-left:2px solid var(--stored);
+  border-radius:var(--r);padding:14px 18px;margin:22px 0;max-width:66ch}
+.defn p{margin:0 0 10px;font-size:16px}
+.defn p:last-child{margin-bottom:0}
+.defn .term{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.06em;
+  color:var(--stored);display:block;margin-bottom:6px}
+.bytes{display:flex;flex-wrap:wrap;gap:3px;margin:18px 0 6px;font-family:"IBM Plex Mono",monospace}
+.bytes span{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:30px;
+  padding:0 4px;font-size:13px;background:var(--riser);border:1px solid var(--etch);border-radius:var(--r);
+  color:var(--ink)}
+.bytes span.sp{color:var(--idle-ink);font-size:16px}
+.bytes span.lf{background:#2A2218;border-color:var(--warn);color:var(--warn);font-size:12px}
+.bytes span.lf.blank{background:var(--warn);color:var(--well);font-weight:500}
+.bytes span.gap{background:none;border:none;min-width:10px}
+.byteskey{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--ink-dim);margin:0 0 18px;
+  max-width:none;line-height:1.7}
+.byteskey b{color:var(--warn);font-weight:500}
+.twocol{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin:20px 0}
+@media (max-width:680px){.twocol{grid-template-columns:1fr}}
+.twocol pre{margin:0;height:100%}
+.twocol h4{margin-bottom:6px}
+.flow{font-family:"IBM Plex Mono",monospace;font-size:12.5px;line-height:1.9;
+  background:var(--well);border:1px solid var(--etch);border-radius:var(--r);padding:14px 16px;
+  margin:20px 0;overflow-x:auto;white-space:pre;color:var(--ink-dim)}
+.flow b{color:var(--ink);font-weight:500}
+.flow i{color:var(--live);font-style:normal}
+.okbad{font-family:"IBM Plex Mono",monospace;font-size:11.5px;margin-top:8px}
+.okbad.ok{color:var(--live)}.okbad.no{color:var(--warn)}
+/* which write() a byte came from: colour plus a distinct underline, so it survives colour-blindness */
+.w1{color:var(--live);text-decoration:underline solid rgba(111,197,168,.45);text-underline-offset:4px}
+.w2{color:var(--stored);text-decoration:underline dashed rgba(127,167,196,.6);text-underline-offset:4px}
+.w3{color:#B9A3E0;text-decoration:underline dotted rgba(185,163,224,.7);text-underline-offset:4px}
 </style>
 </head>
 <body>
@@ -392,16 +429,116 @@ ol.out li.new{color:var(--live)}
 
 <section id="wire">
   <div class="sec-head"><span class="sec-num">03</span><h2>SSE: the wire format</h2></div>
-  <p class="lead">Server-Sent Events is fact 2, standardised. Given a response that stays open, SSE
-  is the answer to "so where does one message end?" — and the answer is a blank line.</p>
-  <p>The body is a sequence of <code>field: value</code> lines. A blank line dispatches whatever has
-  accumulated:</p>
-  <pre>id: 42
-event: task.completed
-data: {"taskId":"write-intro","actor":"writer"}
+  <p class="lead">Given a response that stays open (§02), the next question is "so where does one
+  message end?" Server-Sent Events is the standard answer, and the answer is a blank line. This
+  section shows what that means, byte by byte.</p>
 
-data: a plain message with no id or type — dispatched as "message"
-</pre>
+  <div class="defn">
+    <span class="term">SSE, IN ONE PARAGRAPH</span>
+    <p><strong>Server-Sent Events</strong> is a text format for the body of an HTTP response that
+    stays open. The server writes plain text following a few rules, and the client cuts that text
+    into separate messages called <em>events</em>. There's no new protocol and no server library.
+    Sending an event is a <code>res.write()</code> of a string. Data only flows one way, from server
+    to client.</p>
+    <p>The same spec also defines <strong><code>EventSource</code></strong>, the browser's built-in
+    SSE <em>client</em>. It does the cutting, the dispatching and the reconnecting for you (§04).
+    You don't have to use it: any code that reads the response and cuts on the same rule is an SSE
+    client too (§07). Every AI chat UI works this way.</p>
+  </div>
+
+  <h3>The blank line is two newline characters</h3>
+  <p>This is the whole server side of sending one event:</p>
+  <pre class="lit"><span class="ln">res.write(`data: ${JSON.stringify({ text: "The" })}<span class="nl end">\n\n</span>`)</span></pre>
+  <p>Look at the end of the string. <code>\n</code> is the newline character, a single byte (0x0A),
+  and this string ends with two of them. Here are the exact bytes of two events, written one after
+  the other:</p>
+  <div class="bytes" aria-label="The bytes of two SSE events: data colon space, the JSON, newline, newline, then the second event">
+    <span>d</span><span>a</span><span>t</span><span>a</span><span>:</span><span class="sp" title="space">·</span><span>{</span><span>"</span><span>t</span><span>e</span><span>x</span><span>t</span><span>"</span><span>:</span><span>"</span><span>T</span><span>h</span><span>e</span><span>"</span><span>}</span><span class="lf">\n</span><span class="lf blank">\n</span><span class="gap"></span><span>d</span><span>a</span><span>t</span><span>a</span><span>:</span><span class="sp" title="space">·</span><span>{</span><span>…</span><span>"</span><span class="sp" title="space">·</span><span>c</span><span>a</span><span>t</span><span>"</span><span>}</span><span class="lf">\n</span><span class="lf blank">\n</span>
+  </div>
+  <p class="byteskey">· is a space · <b>first \n</b> ends the line <code>data: {"text":"The"}</code> ·
+  <b>second \n</b> ends a line with nothing on it, which is the "blank line" and the signal that
+  <b>this event is complete</b></p>
+  <p>So there are two levels. A single <code>\n</code> ends one <em>line</em>, and each line is one
+  field. Two in a row, meaning an empty line, end the whole <em>event</em>. You need both levels
+  because an event can have several lines. Every <span class="nl">⏎</span> below is one
+  <code>\n</code>:</p>
+  <pre>id: 42<span class="nl">⏎</span>
+event: task.completed<span class="nl">⏎</span>
+data: {"taskId":"write-intro","actor":"writer"}<span class="nl">⏎</span>
+<span class="nl end">⏎</span>                      <span class="c-com">← empty line: event #1 is complete, dispatch it</span>
+data: a plain message with no id or type<span class="nl">⏎</span>
+<span class="nl end">⏎</span>                      <span class="c-com">← event #2, dispatched as the generic "message"</span></pre>
+
+  <h3>Why a separator is needed at all</h3>
+  <p>The server always puts <code>\n\n</code> right after a complete event. The client, though,
+  doesn't receive "events". It receives bytes, and each <code>read()</code> returns whatever has
+  arrived so far. Fact 1 says those pieces don't line up with the server's writes. Below, the colour
+  shows which <code>write()</code> each byte came from:</p>
+  <pre><span class="c-com">the server wrote two events, each one complete and ending in \n\n</span>
+write() #1   <span class="w1">data: {"text":"The"}<span class="nl end">\n\n</span></span>
+write() #2   <span class="w2">data: {"text":" cat"}<span class="nl end">\n\n</span></span>
+
+<span class="c-com">the client got exactly the same bytes, cut in different places</span>
+read()  #1   <span class="w1">data: {"text":"The"}<span class="nl end">\n\n</span></span><span class="w2">data: {"te</span>
+read()  #2   <span class="w2">xt":" cat"}<span class="nl end">\n\n</span></span></pre>
+  <p>So the <code>\n\n</code> in the middle of read #1 is <em>not</em> in the middle of an object.
+  It's the end of event #1, where the server put it. What comes after it is the <em>start</em> of
+  event #2, whose rest only shows up in read #2. The <code>\n\n</code> is how the client finds that
+  boundary inside a chunk that holds more than one event.</p>
+  <p>A client that's even slightly busy sees this all the time. In this real run the client did
+  something else for 300 ms, and three separate writes arrived as one read:</p>
+  <pre><span class="c-com">// server: three res.write() calls, 50 ms apart</span>
+write()  <span class="w1">"data: {\"text\":\"The\"}\n\n"</span>
+write()  <span class="w2">"data: {\"text\":\" cat\"}\n\n"</span>
+write()  <span class="w3">"data: {\"text\":\" sat\"}\n\n"</span>
+<span class="c-com">// client: one reader.read()</span>
+read()   <span class="w1">"data: {\"text\":\"The\"}\n\n</span>
+          <span class="w2">data: {\"text\":\" cat\"}\n\n</span>
+          <span class="w3">data: {\"text\":\" sat\"}\n\n"</span>   <span class="c-com">← one string, wrapped here to fit</span></pre>
+  <p>The client keeps a buffer and cuts it on <code>\n\n</code>. Here is the idea in four lines:</p>
+  <pre class="lit"><span class="ln">buffer += chunk                        // whatever read() just returned</span><span class="ln">const events = buffer.split("\n\n")    // cut on the blank line</span><span class="ln">buffer = events.pop()                  // the last piece may be unfinished: keep it for later</span><span class="ln">for (const ev of events) show(ev)      // everything else is a complete event</span></pre>
+  <p>Here it is traced through the two reads from the first example:</p>
+  <pre><span class="c-com">read #1 arrives</span>
+buffer = '<span class="w1">data: {"text":"The"}\n\n</span><span class="w2">data: {"te</span>'
+split  → [ '<span class="w1">data: {"text":"The"}</span>', '<span class="w2">data: {"te</span>' ]
+         show() ✓ event #1        keep in buffer ─┘  (no \n\n after it yet)
+
+<span class="c-com">read #2 arrives, and is appended to what was kept</span>
+buffer = '<span class="w2">data: {"te</span>' + '<span class="w2">xt":" cat"}\n\n</span>' = '<span class="w2">data: {"text":" cat"}\n\n</span>'
+split  → [ '<span class="w2">data: {"text":" cat"}</span>', '' ]
+         show() ✓ event #2      keep '' ─┘  (nothing left over)</pre>
+  <p>Without the separator, <code>data: {"te</code> at the end of read #1 would look like a whole
+  message, and <code>JSON.parse</code> would throw on it.</p>
+  <p>A real parser, like the one in the sandbox below and in every browser, goes line by line
+  instead. It also has to handle <code>\r\n</code>, comments and multiple <code>data:</code>
+  lines. The rule is the same: an empty line means "event complete".</p>
+  <p>This is what a 15-line <code>node:http</code> server sending three words (<code>"The"</code>, <code>" cat"</code>, <code>" sat"</code>) actually puts on the
+  wire. On the left is <code>curl -N</code>. On the right the same bytes go through
+  <code>cat -A</code>, which prints every <code>\n</code> as <code>$</code>:</p>
+  <div class="twocol">
+    <div><h4>curl -N localhost:8765</h4><pre>data: {"text":"The"}
+
+data: {"text":" cat"}
+
+data: {"text":" sat"}
+
+event: done
+data: end
+
+</pre></div>
+    <div><h4>… | cat -A</h4><pre>data: {"text":"The"}<span class="nl">$</span>
+<span class="nl end">$</span>
+data: {"text":" cat"}<span class="nl">$</span>
+<span class="nl end">$</span>
+data: {"text":" sat"}<span class="nl">$</span>
+<span class="nl end">$</span>
+event: done<span class="nl">$</span>
+data: end<span class="nl">$</span>
+<span class="nl end">$</span></pre></div>
+  </div>
+  <p>That "empty line" in the terminal is what the whole format hangs on.</p>
+
+  <h3>The fields</h3>
   <ul class="plain">
     <li><code>data:</code> — the payload. Several <code>data:</code> lines before the blank line are
     joined with newlines into one event's data, which is how you send multi-line content without
@@ -434,8 +571,9 @@ data: a plain message with no id or type — dispatched as "message"
     <h4>Sandbox — bytes arrive in chunks, events come out on blank lines</h4>
     <p class="ctlnote">Fact 1 and fact 2 in one place. The server wrote one stream; the network hands
     it over in whatever pieces it likes. Click through and watch the middle panel — that's the
-    half-finished line the parser is holding and cannot act on. An event appears on the right only
-    when a <em>blank line</em> arrives.</p>
+    half-finished line the parser is holding and cannot act on. Every <span class="nl">⏎</span> is
+    one <code>\n</code>. An event is dispatched only when a <span class="nl end">⏎</span> arrives on
+    an otherwise empty line.</p>
     <div class="simgrid">
       <div class="pane">
         <h4>the stream, as the server wrote it</h4>
@@ -461,9 +599,10 @@ data: a plain message with no id or type — dispatched as "message"
 
 <section id="eventsource">
   <div class="sec-head"><span class="sec-num">04</span><h2>EventSource, reconnection, and what you get for free</h2></div>
-  <p class="lead">Fact 3 says resuming needs the receiver to remember a position. The browser will do
-  that for you, in about two lines — as long as you know what it does and, more importantly, what it
-  refuses to do.</p>
+  <p class="lead"><code>EventSource</code> is the SSE client built into every browser. You give it a
+  URL, and it makes the request, cuts the stream on blank lines and calls your handler once per
+  event. Fact 3 says resuming needs the receiver to remember a position, and <code>EventSource</code>
+  does that too. You just need to know what it does and, more importantly, what it refuses to do.</p>
   <pre class="lit"><span class="ln">const es = new EventSource("/events");</span><span class="ln">es.onmessage = (e) =&gt; { const ev = JSON.parse(e.data); handleEvent(ev); };</span><span class="ln">es.addEventListener("task.completed", (e) =&gt; { /* only `event: task.completed` */ });</span></pre>
   <p>What you get for free: parsing, dispatch by event type, and automatic reconnection. When the
   connection drops, the browser waits the reconnection time (default, or whatever a
@@ -553,9 +692,29 @@ data: a plain message with no id or type — dispatched as "message"
   <div class="sec-head"><span class="sec-num">06</span><h2>A model's tokens are an SSE stream</h2></div>
   <p class="lead">"The model streams its response" is §03 with a schema. Set <code>stream: true</code>
   on an Anthropic Messages API call and the response body is exactly a
-  <code>text/event-stream</code> — same blank lines, same <code>event:</code> and <code>data:</code>
-  fields, same buffering problem. What's added is that the event types and payloads are documented
-  rather than ad hoc.</p>
+  <code>text/event-stream</code>, with the same <code>\n\n</code>, the same <code>event:</code> and
+  <code>data:</code> fields and the same buffering problem. The difference is that the event types
+  and payloads are documented rather than made up per app.</p>
+
+  <h3>Why models stream at all</h3>
+  <p>A model produces its answer one token at a time, and a long answer takes seconds to finish.
+  Without streaming, the server can only respond once the last token exists, so the user watches an
+  empty box the whole time. With streaming, each piece of text goes out as its own event as soon as
+  it's generated, and the words appear while the rest is still being written. The total time is the
+  same. What changes is how long until the first word shows up, and in a chat UI that's the number
+  users notice.</p>
+
+  <h3>What is actually on the wire</h3>
+  <p>This is one text fragment of a real response, exactly as the bytes arrive (⏎ is
+  <code>\n</code>):</p>
+  <pre>event: content_block_delta<span class="nl">⏎</span>
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cat"}}<span class="nl">⏎</span>
+<span class="nl end">⏎</span>                      <span class="c-com">← blank line: this fragment is complete</span></pre>
+  <p>The client cuts on the blank line (§03), runs <code>JSON.parse</code> on the
+  <code>data:</code> line, and appends <code>delta.text</code> to what's on screen. That's the whole
+  "typing" effect: hundreds of these small events, one after another.</p>
+
+  <h3>The shape of one turn</h3>
   <p>One turn is a fixed sequence: <code>message_start</code> (the message shell, with an empty
   content array), then per content block <code>content_block_start</code> → repeated
   <code>content_block_delta</code> → <code>content_block_stop</code>, then <code>message_delta</code>
@@ -574,34 +733,60 @@ data: a plain message with no id or type — dispatched as "message"
   is making exactly that guess, and it will be wrong on every tool call with more than one delta.</p>
 
   <div class="demo">
-    <h4>Sandbox — stepping through a real captured tool-call turn</h4>
-    <p class="ctlnote">Press "next chunk" repeatedly and watch the lower-right panel: the tool's
-    arguments arrive as a string that is <em>not valid JSON</em> until the block closes. That is the
-    whole reason a client accumulates deltas instead of parsing each one.</p>
+    <h4>Sandbox — a model's response, bytes → events → text on screen</h4>
+    <p class="ctlnote">Each click delivers the next event's raw bytes, which go through the same
+    parser as §03's sandbox. Watch three things: the <span class="nl end">⏎</span> that closes every
+    event, the sentence building up on the right, and the tool's arguments, which are
+    <em>not valid JSON</em> until their block closes.</p>
     <div class="simgrid">
       <div class="pane">
-        <h4>SSE event</h4>
-        <pre data-ai-event style="margin:0">(press "next chunk")</pre>
+        <h4 class="fname"><span>1 · raw bytes received</span><span class="count" data-ai-count></span></h4>
+        <pre data-ai-raw style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere">(press "next event")</pre>
+        <h4 style="margin-top:14px">2 · what the parser dispatched</h4>
+        <pre data-ai-event style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--stored)">—</pre>
       </div>
       <div class="pane">
-        <h4>accumulated so far</h4>
+        <h4>3 · text on screen</h4>
         <div data-ai-text style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;white-space:pre-wrap"></div>
-        <h4 style="margin-top:14px">tool input (raw, may not be valid JSON yet)</h4>
+        <h4 style="margin-top:14px">tool input, accumulated</h4>
         <div data-ai-tool style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;white-space:pre-wrap;color:var(--stored)"></div>
+        <div class="okbad" data-ai-valid></div>
       </div>
     </div>
     <div class="controls">
-      <button type="button" data-ai-next>next chunk</button>
+      <button type="button" data-ai-next>next event</button>
+      <button type="button" data-ai-all class="ghost">play the rest</button>
       <button type="button" class="ghost" data-ai-reset>reset</button>
     </div>
     <p class="hint" data-ai-hint>Quoted verbatim from Anthropic's Messages API streaming
-    documentation ("Streaming request with tool use") — see
-    <code>fixtures/ai-stream-tool-call.json</code> for the exact bytes and their source.</p>
+    documentation ("Streaming request with tool use"). The bytes are in
+    <code>fixtures/ai-stream-raw.txt</code>.</p>
   </div>
   <p class="src">Source: <a href="https://platform.claude.com/docs/en/build-with-claude/streaming">Anthropic
   Messages API — streaming</a>. The fixture is quoted from that published documentation, not captured
-  from a live API call; <code>fixtures/build-fixture.mjs</code> rebuilds it from
-  <code>fixtures/ai-stream-raw.txt</code>.</p>
+  from a live API call.</p>
+
+  <h3>In a real app there are two streams, not one</h3>
+  <p>The browser never calls the model API directly, because that would mean shipping your API key
+  to every visitor. Your own server sits in the middle: it reads the model's stream and writes a
+  stream of its own back to the browser.</p>
+  <div class="flow">1  <b>browser</b>     ── POST /api/chat {messages} ──────────▶ <b>your server</b>
+2  <b>your server</b> ── POST /v1/messages + x-api-key ─────▶ <b>model API</b>
+3  <b>model API</b>   ── <i>SSE</i>: content_block_delta… ─────────▶ <b>your server</b>
+4  <b>your server</b> ── <i>SSE</i>: your own events ──────────────▶ <b>browser</b></div>
+  <p>The simplest middle passes the bytes through unchanged. The framing survives because a
+  <code>\n\n</code> means the same thing on both hops:</p>
+  <pre class="lit"><span class="ln">app.post("/api/chat", async (req, res) =&gt; {</span><span class="ln">  const upstream = new AbortController();</span><span class="ln">  res.on("close", () =&gt; upstream.abort());   // browser left → stop paying for tokens</span><span class="ln"></span><span class="ln">  const model = await fetch("https://api.anthropic.com/v1/messages", {</span><span class="ln">    method: "POST",</span><span class="ln">    headers: {</span><span class="ln">      "x-api-key": process.env.ANTHROPIC_API_KEY,   // stays on the server</span><span class="ln">      "anthropic-version": "2023-06-01",</span><span class="ln">      "content-type": "application/json",</span><span class="ln">    },</span><span class="ln">    body: JSON.stringify({ model: "claude-opus-5", max_tokens: 1024, stream: true, messages: req.body.messages }),</span><span class="ln">    signal: upstream.signal,</span><span class="ln">  });</span><span class="ln"></span><span class="ln">  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });</span><span class="ln">  res.flushHeaders();</span><span class="ln">  for await (const chunk of model.body) res.write(chunk);   // bytes in, bytes out</span><span class="ln">  res.end();</span><span class="ln">});</span></pre>
+  <p>In practice the middle usually does more work. It parses the model's events (§07), saves the
+  finished answer to a database, counts tokens for billing, and re-emits only what the UI needs,
+  e.g. <code>data: {"text":" cat"}\n\n</code>. That's also the point to add <code>id:</code> fields
+  if you want resumption, because:</p>
+  <p class="caveat"><strong>A model stream can't be resumed.</strong> Its events carry no
+  <code>id:</code> field, so there's no <code>Last-Event-ID</code> to send back, and the model API
+  has nothing to resume from anyway. If the connection drops halfway through an answer, that answer
+  is gone. You either send the request again or keep the partial text. §04's machinery only applies
+  to the stream <em>your</em> server writes, and only if your server buffers the generation and
+  numbers its events.</p>
 </section>
 
 <section id="consume">
@@ -609,7 +794,11 @@ data: a plain message with no id or type — dispatched as "message"
   <p class="lead">§04 explained why real code often can't use <code>EventSource</code>: no headers,
   no request body, GET only. The replacement is <code>fetch</code> plus the response's
   <code>ReadableStream</code> — thirty lines, and one of them is a trap.</p>
-  <pre class="lit"><span class="ln">const res = await fetch("/v1/messages", {</span><span class="ln">  method: "POST",                       // EventSource cannot do this</span><span class="ln">  headers: { authorization: `Bearer ${token}` },  // nor this</span><span class="ln">  body: JSON.stringify({ stream: true, messages }),</span><span class="ln">  signal: controller.signal,            // nor cancellation</span><span class="ln">});</span><span class="ln"></span><span class="ln">const reader = res.body!.getReader();</span><span class="ln">const decoder = new TextDecoder();</span><span class="ln">const parser = createSseParser();</span><span class="ln"></span><span class="ln">for (;;) {</span><span class="ln">  const { value, done } = await reader.read();</span><span class="ln">  if (done) break;</span><span class="ln">  for (const event of parser.push(decoder.decode(value, { stream: true }))) {</span><span class="ln">    handle(event);</span><span class="ln">  }</span><span class="ln">}</span></pre>
+  <pre class="lit"><span class="ln">const res = await fetch("/api/chat", {    // your server (§06), never the model API directly</span><span class="ln">  method: "POST",                       // EventSource cannot do this</span><span class="ln">  headers: { authorization: `Bearer ${sessionToken}` },  // nor this (your app's login, not the model key)</span><span class="ln">  body: JSON.stringify({ messages }),</span><span class="ln">  signal: controller.signal,            // nor cancellation</span><span class="ln">});</span><span class="ln"></span><span class="ln">const reader = res.body!.getReader();</span><span class="ln">const decoder = new TextDecoder();</span><span class="ln">const parser = createSseParser();       // cuts on the blank line, §03</span><span class="ln"></span><span class="ln">for (;;) {</span><span class="ln">  const { value, done } = await reader.read();   // some bytes: half an event, or three</span><span class="ln">  if (done) break;</span><span class="ln">  for (const event of parser.push(decoder.decode(value, { stream: true }))) {</span><span class="ln">    if (event.event !== "content_block_delta") continue;</span><span class="ln">    const { delta } = JSON.parse(event.data);     // safe: the event is complete</span><span class="ln">    if (delta.type === "text_delta") output.textContent += delta.text;</span><span class="ln">  }</span><span class="ln">}</span></pre>
+  <p>Those last four lines are the path from bytes to words on screen. <code>parser.push</code> only
+  returns an event once its blank line has arrived, so <code>JSON.parse</code> never sees half a
+  line. It still might see half a <em>tool call</em>, which is why §06 accumulates
+  <code>partial_json</code> instead of parsing it.</p>
   <p>Two buffers are in play here and they are easy to confuse. The <em>parser</em> buffers a partial
   line until a newline arrives (§03). The <em>decoder</em> buffers partial bytes until a whole
   character arrives — and that is what <code>{ stream: true }</code> buys. The Encoding standard
@@ -741,7 +930,9 @@ data: a plain message with no id or type — dispatched as "message"
     <li>One <code>write()</code> is not one <code>read()</code>. Anything that assumes otherwise is
     correct on localhost and wrong in production.</li>
     <li>Every stream needs a framing rule, because "no more bytes yet" and "no more bytes ever" look
-    identical. SSE's is a blank line; a model turn's is <code>content_block_stop</code>.</li>
+    identical. SSE's is a blank line, which on the wire is just <code>\n\n</code>: one
+    <code>\n</code> ends a field, the second ends the event. A model turn's is
+    <code>content_block_stop</code>.</li>
     <li>Closing the connection does not dispatch the last event. It needs its blank line, and the
     spec says so in as many words.</li>
     <li>Streaming over HTTP is not a hack: chunked transfer coding exists to carry "content streams
@@ -755,6 +946,9 @@ data: a plain message with no id or type — dispatched as "message"
     <li>Decode with <code>{ stream: true }</code>. A multi-byte character split across chunks becomes
     <code>U+FFFD</code> permanently, and it only happens to text you didn't test with.</li>
     <li>Cancel with <code>AbortController</code>, and treat <code>AbortError</code> as a normal exit.</li>
+    <li>A model's reply streams to <em>your</em> server, and your server streams to the browser. The
+    API key never leaves the server, and a dropped model stream can't be resumed. Only the stream
+    you write yourself can carry <code>id:</code>s.</li>
     <li>Send keep-alive comments and clean up on <code>close</code>. One keeps proxies from reaping
     you; the other keeps you from leaking a listener per disconnect.</li>
     <li>If it works with <code>curl -N</code> and not through the proxy, it's the proxy. Over
@@ -856,7 +1050,8 @@ function createSseParser() {
       note: 'The rest of the line landed, so the buffer is empty again and the data: field is '
           + 'understood. Still nothing dispatched: SSE dispatches on a blank line, and none has come.' },
     { bytes: '\n',
-      note: 'One newline, making the blank line. Now the buffered event is dispatched — three lines '
+      note: 'A single \\n byte. The previous line already ended with \\n, so this one ends a line '
+          + 'with nothing on it: the blank line. Now the buffered event is dispatched, and two lines '
           + 'of input became one event.' },
     { bytes: ': keep-alive\n\n',
       note: 'A line starting with ":" is a comment. Servers send these so idle proxies do not close '
@@ -871,14 +1066,32 @@ function createSseParser() {
   let i = 0;
   let events = [];
 
+  // Render text with every \n shown as a visible ⏎ (followed by the real line
+  // break), and the \n that makes an empty line highlighted: that one dispatches.
+  function withNewlines(parent, text, startsLine) {
+    let atLineStart = startsLine;
+    for (const part of text.split(/(\n)/)) {
+      if (part === '\n') {
+        const mark = document.createElement('span');
+        mark.className = atLineStart ? 'nl end' : 'nl';
+        mark.textContent = '⏎';
+        parent.append(mark, '\n');
+        atLineStart = true;
+      } else if (part) {
+        parent.append(part);
+        atLineStart = false;
+      }
+    }
+  }
+
   function renderStream() {
     const consumed = CHUNKS.slice(0, i).map((c) => c.bytes).join('').length;
     streamEl.textContent = '';
     const done = document.createElement('span');
-    done.textContent = FULL.slice(0, consumed);
+    withNewlines(done, FULL.slice(0, consumed), true);
     done.style.color = 'var(--live)';
     const todo = document.createElement('span');
-    todo.textContent = FULL.slice(consumed);
+    withNewlines(todo, FULL.slice(consumed), consumed === 0 || FULL[consumed - 1] === '\n');
     todo.style.opacity = '.45';
     streamEl.append(done, todo);
   }
@@ -940,47 +1153,116 @@ function createSseParser() {
 (() => {
   const root = document.getElementById('model');
   if (!root) return;
+  const rawEl = root.querySelector('[data-ai-raw]');
   const eventEl = root.querySelector('[data-ai-event]');
   const textEl = root.querySelector('[data-ai-text]');
   const toolEl = root.querySelector('[data-ai-tool]');
-  let chunks = [];
+  const validEl = root.querySelector('[data-ai-valid]');
+  const countEl = root.querySelector('[data-ai-count]');
+  const hintEl = root.querySelector('[data-ai-hint]');
+  const HINT = hintEl.innerHTML;
+
+  // The raw bytes, cut into one piece per event so each click is one event.
+  // Every piece gets its terminating blank line back: the parser dispatches on it.
+  let blocks = [];
+  let parser = createSseParser();
   let i = 0;
   let text = '';
   let toolJson = '';
+  let toolOpen = false;
+
+  function showRaw(bytes) {
+    rawEl.textContent = '';
+    let atLineStart = true;
+    for (const part of bytes.split(/(\n)/)) {
+      if (part === '\n') {
+        const mark = document.createElement('span');
+        mark.className = atLineStart ? 'nl end' : 'nl';
+        mark.textContent = '⏎';
+        rawEl.append(mark, '\n');
+        atLineStart = true;
+      } else if (part) {
+        rawEl.append(part);
+        atLineStart = false;
+      }
+    }
+  }
+
+  function note(ev, data) {
+    const d = data.delta;
+    switch (ev.event) {
+      case 'message_start': return 'message_start: the empty shell of the reply. No text yet.';
+      case 'content_block_start': return data.content_block.type === 'tool_use'
+        ? `content_block_start, type tool_use: the model is calling "${data.content_block.name}". `
+          + 'Its arguments will arrive in pieces.'
+        : 'content_block_start: a text block opens. Deltas for it follow.';
+      case 'ping': return 'ping: a keep-alive with no content. The client ignores it.';
+      case 'content_block_delta': return d.type === 'text_delta'
+        ? `text_delta: append ${JSON.stringify(d.text)} to the screen. This is the "typing".`
+        : `input_json_delta: another fragment of the tool's arguments, ${JSON.stringify(d.partial_json)}. `
+          + 'Append it; do not parse it yet.';
+      case 'content_block_stop': return toolJson && !toolOpen
+        ? 'content_block_stop: the tool block is closed, so its arguments are finally complete JSON.'
+        : 'content_block_stop: this block is complete.';
+      case 'message_delta': return `message_delta: stop_reason = "${d.stop_reason}".`;
+      case 'message_stop': return 'message_stop: the turn is over.';
+      default: return ev.event;
+    }
+  }
 
   function render() {
-    if (i === 0) {
-      eventEl.textContent = '(press "next chunk")';
-      return;
-    }
-    const c = chunks[i - 1];
-    eventEl.textContent = `${c.event}\n${JSON.stringify(c.data, null, 2)}`;
+    countEl.textContent = blocks.length ? `event ${i} / ${blocks.length}` : '';
     textEl.textContent = text || '(no text yet)';
     toolEl.textContent = toolJson || '(no tool call yet)';
+    if (!toolJson) { validEl.textContent = ''; validEl.className = 'okbad'; }
+    else {
+      let ok = true;
+      try { JSON.parse(toolJson); } catch { ok = false; }
+      validEl.className = `okbad ${ok ? 'ok' : 'no'}`;
+      validEl.textContent = ok ? '✓ JSON.parse succeeds' : '✗ JSON.parse would throw here';
+    }
+    if (i === 0) {
+      rawEl.textContent = '(press "next event")';
+      eventEl.textContent = '—';
+      hintEl.innerHTML = HINT;
+    }
+    root.querySelector('[data-ai-next]').disabled = i >= blocks.length;
+    root.querySelector('[data-ai-all]').disabled = i >= blocks.length;
   }
 
-  function apply(c) {
-    if (c.event === 'content_block_delta' && c.data.delta?.type === 'text_delta') {
-      text += c.data.delta.text;
-    }
-    if (c.event === 'content_block_delta' && c.data.delta?.type === 'input_json_delta') {
-      toolJson += c.data.delta.partial_json;
+  function step() {
+    if (i >= blocks.length) return;
+    const bytes = blocks[i++];
+    showRaw(bytes);
+    for (const ev of parser.push(bytes)) {
+      const data = JSON.parse(ev.data);
+      if (ev.event === 'content_block_start') toolOpen = data.content_block.type === 'tool_use';
+      if (ev.event === 'content_block_stop') toolOpen = false;
+      if (data.delta?.type === 'text_delta') text += data.delta.text;
+      if (data.delta?.type === 'input_json_delta') toolJson += data.delta.partial_json;
+      eventEl.textContent = `event: ${ev.event}\ndata:  ${JSON.stringify(data, null, 2)}`;
+      hintEl.textContent = note(ev, data);
     }
   }
 
-  fetch('fixtures/ai-stream-tool-call.json')
-    .then((r) => r.json())
-    .then((fixture) => { chunks = fixture.chunks; });
+  fetch('fixtures/ai-stream-raw.txt')
+    .then((r) => r.text())
+    .then((raw) => {
+      blocks = raw.replace(/\r\n/g, '\n').split(/\n\n+/).filter((b) => b.trim()).map((b) => `${b.trim()}\n\n`);
+      render();
+    });
 
-  root.querySelector('[data-ai-next]').addEventListener('click', () => {
-    if (i >= chunks.length) return;
-    apply(chunks[i]);
-    i++;
+  root.querySelector('[data-ai-next]').addEventListener('click', () => { step(); render(); });
+  root.querySelector('[data-ai-all]').addEventListener('click', () => {
+    while (i < blocks.length) step();
     render();
   });
   root.querySelector('[data-ai-reset]').addEventListener('click', () => {
-    i = 0; text = ''; toolJson = ''; render();
+    parser = createSseParser();
+    i = 0; text = ''; toolJson = ''; toolOpen = false;
+    render();
   });
+  render();
 })();
 </script>
 <script>
